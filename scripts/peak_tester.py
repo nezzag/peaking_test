@@ -81,7 +81,7 @@ class EmissionsPeakTest:
         self.noise_params: Optional[Dict] = None
         self.noise_generator: Optional[Callable] = None
         self.bootstrap_results: Optional[Dict] = None
-        self.residuals: Optional[np.ndarray] = None
+        self.residuals: Optional[pd.Series] = None
         self.trend_info: Optional[Dict] = None
 
     # =================================
@@ -171,6 +171,8 @@ class EmissionsPeakTest:
         method: str = "all_data",
         segment_length: int = 10,
         distribution: str = "normal",
+        ignore_years: list = None,
+        clip_distribution: tuple = None,
     ) -> "EmissionsPeakTest":
         """
         Characterize the noise distribution in historical emissions data.
@@ -190,7 +192,7 @@ class EmissionsPeakTest:
             method, segment_length
         )
         self.noise_params, self.noise_generator = self._fit_noise_distribution(
-            distribution
+            ignore_years, clip_distribution, distribution
         )
 
         print("Noise characterization complete:")
@@ -203,7 +205,7 @@ class EmissionsPeakTest:
 
     def _calculate_residuals(
         self, method: str, segment_length: int
-    ) -> Tuple[np.ndarray, Dict]:
+    ) -> Tuple[pd.Series, Dict]:
         """Calculate residuals from trend fitting."""
         residuals_list = []
         trend_info = {}
@@ -217,7 +219,7 @@ class EmissionsPeakTest:
             trend = model.predict(X)
             residuals = y - trend
 
-            residuals_list.extend(residuals)
+            residuals_list.append(pd.Series(index=X.reshape(X.shape[0]),data=residuals))
             trend_info["all_data"] = {
                 "year_min": X.min(),
                 "year_max": X.max(),
@@ -235,7 +237,7 @@ class EmissionsPeakTest:
             end_year = years[-1]
 
             for year_start in range(start_year, end_year, segment_length):
-                year_end = min(year_start + segment_length, end_year + 1)
+                year_end = min(year_start + segment_length, end_year)
 
                 mask = (years >= year_start) & (years <= year_end)
                 # Check that there are enough data points (>=3) in each segment to calculate a trend and residuals
@@ -250,7 +252,10 @@ class EmissionsPeakTest:
                 trend_seg = model.predict(X_seg)
                 residuals_seg = y_seg - trend_seg
 
-                residuals_list.extend(residuals_seg)
+                residuals_list.append(
+                    pd.Series(index=X_seg.reshape(X_seg.shape[0]),data=residuals_seg)
+                )
+                
                 trend_info[f"{year_start}-{year_end}"] = {
                     "year_min": year_start,
                     "year_max": year_end,
@@ -262,14 +267,25 @@ class EmissionsPeakTest:
         else:
             raise ValueError("Method must be 'all_data' or 'segments'")
 
-        return np.array(residuals_list), trend_info
+        residuals = pd.concat(residuals_list)
+        return residuals, trend_info
 
-    def _fit_noise_distribution(self, noise_type="auto"):
+    def _fit_noise_distribution(
+            self,
+            ignore_years: list = None,
+            clip_distribution: tuple = None,
+            noise_type: str = "auto"):
         """
         Fit noise distribution with proper parameter handling for both normal and t-distributions.
 
         Args:
-            noise_type: 'normal', 't', or 'auto'
+            ignore_years [list]: List of specific years to ignore from the residuals 
+            because they are too large a variation and could bias the results (e.g. the GFC or COVID-19)
+
+            clip_distribution [tuple]: Clip the distribution of residuals to exclude
+            outlying percentiles (e.g. <5 and >95) before calculating
+            
+            noise_type [str]: 'normal', 't', or 'auto'
                 - 'normal': Fit normal distribution
                 - 't': Fit t-distribution
                 - 'auto': Test both and select better fit based on AIC
@@ -284,6 +300,18 @@ class EmissionsPeakTest:
             )
 
         residuals = self.residuals
+
+        # Only either drop specific years from the investigation, or clip the distribution
+        # Don't do both
+        if ignore_years:
+            residuals = residuals.drop(ignore_years)
+
+        elif clip_distribution:
+            if len(clip_distribution) != 2:
+                raise ValueError('Clip_distribution must be a tuple of type (float,float)')
+            residuals = residuals[
+                (residuals >= residuals.quantile(clip_distribution[0])) & 
+                (residuals <= residuals.quantile(clip_distribution[1]))]
 
         if noise_type == "auto":
             # Test both distributions and choose better fit
@@ -399,7 +427,7 @@ class EmissionsPeakTest:
 
         return model.coef_[0], model.score(X, y)
 
-    def run_bootstrap_test(self, n_bootstrap: int = 1000, alpha: float = 0.05) -> Dict:
+    def run_bootstrap_test(self, n_bootstrap: int = 10000, alpha: float = 0.05) -> Dict:
         """
         Run a one-tailed bootstrap hypothesis test.
 
@@ -471,10 +499,8 @@ class EmissionsPeakTest:
         self, bootstrap_slopes: np.ndarray, observed_slope: float
     ) -> float:
         """Calculate one-tailed p-value."""
-        if observed_slope < 0:  # Testing for decline
-            return np.sum(bootstrap_slopes <= observed_slope) / len(bootstrap_slopes)
-        else:  # Testing for increase
-            return np.sum(bootstrap_slopes >= observed_slope) / len(bootstrap_slopes)
+        # Testing for decline
+        return np.sum(bootstrap_slopes <= observed_slope) / len(bootstrap_slopes)
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
@@ -584,7 +610,7 @@ class EmissionsPeakTest:
             print(f"Plot saved to {save_path}")
 
         plt.show()
-        return fig
+        return
 
     def _plot_historical_and_test_data(self, ax: plt.Axes) -> None:
         """Plot historical data with test data overlay and calculated trend lines."""
