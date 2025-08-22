@@ -1,0 +1,14 @@
+name: peaking_test
+dependencies:
+- python=3.11.4
+- pandas>=0.24
+- scikit-learn
+- scipy
+- numpy
+- matplotlib
+- seaborn
+- jupyterlab
+- pytest
+- pip
+- pip:
+  - pandas_indexing
