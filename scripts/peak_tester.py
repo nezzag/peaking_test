@@ -37,13 +37,17 @@ Author: Neil Grant and Claire Fyson
 # =================================
 
 import numpy as np
-from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
 from scipy import stats
 from sklearn.linear_model import LinearRegression
+from statsmodels.tsa.stattools import acf
+from statsmodels.stats.diagnostic import acorr_ljungbox
 from typing import List, Tuple, Dict, Optional, Callable, Union
+from statsmodels.tsa.arima.model import ARIMA
 import warnings
+from itertools import combinations
 
 warnings.filterwarnings("ignore")
 
@@ -838,3 +842,6 @@ if __name__ == "__main__":
     print("• interpret_results()")
     print("• plot_analysis()")
     print("• export_results()")
+
+
+
