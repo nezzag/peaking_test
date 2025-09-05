@@ -176,7 +176,6 @@ class EmissionsPeakTest:
     def characterize_noise(
         self,
         method: str = "hp",
-        distribution: str = "normal",
         ignore_years: list = None,
         clip_distribution: tuple = None,
     ) -> "EmissionsPeakTest":
@@ -199,16 +198,13 @@ class EmissionsPeakTest:
         )
 
         self.autocorr_params = self._analyze_autocorrelation()
-        
-        self.noise_params, self.noise_generator = self._fit_noise_distribution(
-            ignore_years, clip_distribution, distribution
-        )
+    
 
         print("Noise characterization complete:")
-        print(f"  Method: {method}")
-        print(f"  Distribution: {distribution}")
-        print(f"  Noise std: {self.noise_params['sigma']:.1f} Mt")
-        print(f"  Residuals: {len(self.residuals)} points")
+        print(f"  Method used: {method}")
+        # print(f"  Distribution: {distribution}")
+        # print(f"  Noise std: {self.noise_params['sigma']:.1f} Mt")
+        # print(f"  Residuals: {len(self.residuals)} points")
 
         return self
 
@@ -370,13 +366,16 @@ class EmissionsPeakTest:
             phi_fitted = ar_model.coef_[0]
             innovation_residuals = y - ar_model.predict(X)
             sigma_innovation = np.std(innovation_residuals)
+            mean_innovation = np.mean(innovation_residuals)
         else:
             phi_fitted = 0
             sigma_innovation = np.std(self.residuals)
         
         self.autocorr_params = {
             'phi': phi_fitted,
-            'sigma_innovation': sigma_innovation,
+            'residuals': innovation_residuals,
+            'sigma_residuals': sigma_innovation,
+            'mean_residuals': mean_innovation,
             'acf_lag1': phi,
             'has_autocorr': abs(phi) > 0.1,
             'is_stationary': abs(phi_fitted) < 1
@@ -391,13 +390,12 @@ class EmissionsPeakTest:
         return self.autocorr_params
 
 
-    def _fit_noise_distribution(
+    def create_noise_generator(
             self,
             ignore_years: list = None,
-            clip_distribution: tuple = None,
-            noise_type: str = "auto"):
+            clip_distribution: tuple = None):
         """
-        Fit noise distribution with proper parameter handling for both normal and t-distributions.
+        Create noise generator
 
         Args:
             ignore_years [list]: List of specific years to ignore from the residuals 
@@ -415,15 +413,26 @@ class EmissionsPeakTest:
             params: Dictionary with standardized parameter names
             generator: Function to generate noise samples
         """
+
+
+        """Create autocorrelation-aware noise generator."""
         if self.residuals is None:
             raise ValueError(
                 "Must call characterize_noise() first to calculate residuals"
             )
-
+    
+        if self.autocorr_params is None:
+            self._analyze_autocorrelation()
+        
         residuals = self.residuals
+        phi = self.autocorr_params['phi']
+        sigma = self.autocorr_params['sigma_residuals']
+        mean = self.autocorr_params['mean_residuals']
+        residuals_post_ar = self.autocorr_params['residuals']
 
         # Only either drop specific years from the investigation, or clip the distribution
-        # Don't do both
+        # TODO: This would need to be moved to prior to the analysis of autocorrelation if we want to clip,
+        # otherwise autocorrelation parameters are still based on this. Currentl doesn't do anything
         if ignore_years:
             residuals = residuals.drop(ignore_years)
 
@@ -433,87 +442,36 @@ class EmissionsPeakTest:
             residuals = residuals[
                 (residuals >= residuals.quantile(clip_distribution[0])) & 
                 (residuals <= residuals.quantile(clip_distribution[1]))]
-
-        if noise_type == "auto":
-            # Test both distributions and choose better fit
-            normal_params = stats.norm.fit(residuals)
-            t_params = stats.t.fit(residuals)
-
-            # Compare using AIC (lower is better)
-            normal_aic = (
-                -2 * np.sum(stats.norm.logpdf(residuals, *normal_params)) + 2 * 2
-            )
-            t_aic = -2 * np.sum(stats.t.logpdf(residuals, *t_params)) + 2 * 3
-
-            if normal_aic <= t_aic:
-                noise_type = "normal"
-                print(
-                    f"Auto-selected normal distribution (AIC: {normal_aic:.1f} vs {t_aic:.1f})"
-                )
-            else:
-                noise_type = "t"
-                print(
-                    f"Auto-selected t-distribution (AIC: {t_aic:.1f} vs {normal_aic:.1f})"
-                )
-
-        # Fit the selected distribution with proper parameter handling
-        if noise_type == "normal":
-            params_tuple = stats.norm.fit(residuals)
-
-            # Store with consistent naming - both distributions have 'mu', 'sigma', 'scale'
-            params = {
-                "type": "normal",
-                "mu": params_tuple[0],  # Location parameter
-                "sigma": params_tuple[1],  # Scale parameter (standard deviation)
-                "scale": params_tuple[1],  # Alias for consistency
-                "fitted_params": params_tuple,
-            }
-
-            # Create generator function specific to normal distribution
-            def noise_generator(size):
-                return stats.norm.rvs(
-                    loc=params["mu"], scale=params["sigma"], size=size
-                )
-
-        elif noise_type == "t":
-            params_tuple = stats.t.fit(residuals)  # Returns (df, loc, scale)
-
-            # Store with consistent naming - ensure 'sigma' is available
-            params = {
-                "type": "t",
-                "df": params_tuple[0],  # Degrees of freedom (unique to t-dist)
-                "mu": params_tuple[1],  # Location parameter
-                "scale": params_tuple[2],  # Scale parameter
-                "sigma": params_tuple[
-                    2
-                ],  # Use scale as sigma equivalent for compatibility
-                "fitted_params": params_tuple,
-            }
-
-            # Create generator function specific to t-distribution
-            def noise_generator(size):
-                return stats.t.rvs(
-                    df=params["df"], loc=params["mu"], scale=params["scale"], size=size
-                )
-
+        
+        
+        if self.autocorr_params['has_autocorr'] and self.autocorr_params['is_stationary']:
+            print(f"Using AR(1) noise generator with φ={phi:.3f}")
+            
+            def ar1_noise_generator(size: int, initial_value: float = 0) -> np.ndarray:
+                """Generate AR(1) autocorrelated noise."""
+                #TODO: Think about t-distribution here instead of normal, and allowing non-zero mean
+                innovations = np.random.normal(0, sigma, size)
+                series = np.zeros(size)
+                series[0] = initial_value
+                
+                for t in range(1, size):
+                    series[t] = phi * series[t-1] + innovations[t]
+                
+                return series
+            
+            self.noise_generator = ar1_noise_generator
+        
         else:
-            raise ValueError("noise_type must be 'normal', 't', or 'auto'")
-
-        # Store parameters and generator for later use
-        self.noise_params = params
-        self.noise_generator = noise_generator
-
-        print(f"Fitted {params['type']} distribution:")
-        if params["type"] == "normal":
-            print(f"  μ (mean) = {params['mu']:.2f}")
-            print(f"  σ (std)  = {params['sigma']:.2f}")
-        else:
-            print(f"  df (degrees of freedom) = {params['df']:.2f}")
-            print(f"  μ (location) = {params['mu']:.2f}")
-            print(f"  scale = {params['scale']:.2f}")
-
-        return params, noise_generator
-
+            print(f"Using white noise generator with σ={sigma:.1f}")
+            
+            def white_noise_generator(size: int, initial_value: float = 0) -> np.ndarray:
+                """Generate white noise."""
+                return np.random.normal(0, sigma, size)
+            
+            self.noise_generator = white_noise_generator
+        
+        return self.noise_generator
+    
     def set_test_data(self, test_data: List[Tuple[int, float]]) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
@@ -548,80 +506,121 @@ class EmissionsPeakTest:
 
         return model.coef_[0], model.score(X, y)
 
-    def run_bootstrap_test(self, n_bootstrap: int = 10000, alpha: float = 0.05) -> Dict:
+    def run_complete_bootstrap_test(self, n_bootstrap: int = 10000, 
+                                   null_hypothesis: str = "zero_trend",
+                                   bootstrap_method: str = "ar_bootstrap") -> Dict:
         """
-        Run a one-tailed bootstrap hypothesis test.
-
+        Run complete bootstrap test with all enhancements.
+        
         Args:
-            n_bootstrap: Number of bootstrap samples
-            alpha: Significance level
-
-        Returns:
-            Dictionary with test results
+            null_hypothesis: "recent_trend" or "zero_trend"
+            bootstrap_method: "ar_bootstrap", "block_bootstrap", or "white_noise"
         """
-        if self.test_data is None:
-            raise ValueError("Must set test data first")
         if self.noise_generator is None:
-            raise ValueError("Must characterize noise first")
-
-        print(f"Running bootstrap test with {n_bootstrap} samples...")
-
-        # Generate bootstrap samples under null hypothesis
-        bootstrap_slopes = self._generate_bootstrap_slopes(n_bootstrap)
-
-        # Calculate p-values
-        p_value_one_tail = self._calculate_p_value(bootstrap_slopes, self.test_slope)
-
-        # Store results
-        self.bootstrap_results = {
-            "test_slope": self.test_slope,
-            "test_r2": self.test_r2,
-            "bootstrap_slopes": bootstrap_slopes,
-            "p_value_one_tail": p_value_one_tail,
-            "significant_one_tail": p_value_one_tail < alpha,
-            "alpha": alpha,
-            "n_bootstrap": n_bootstrap,
-            "bootstrap_mean": np.mean(bootstrap_slopes),
-            "bootstrap_std": np.std(bootstrap_slopes),
-        }
-
-        print("Bootstrap test complete:")
-        print(f"  P-value (one-tail): {p_value_one_tail:.4f}")
-        print(
-            f"  Significant (α={alpha}): {self.bootstrap_results['significant_one_tail']}"
+            self.create_noise_generator()
+        
+        print(f"Running complete bootstrap test...")
+        print(f"  Null hypothesis: {null_hypothesis}")
+        print(f"  Bootstrap method: {bootstrap_method}")
+        print(f"  Bootstrap samples: {n_bootstrap}")
+        
+        bootstrap_slopes = self._generate_bootstrap_slopes(
+            n_bootstrap, null_hypothesis, bootstrap_method
         )
-
-        return
-
-    def _generate_bootstrap_slopes(self, n_bootstrap: int) -> np.ndarray:
-        """Generate bootstrap slopes under null hypothesis."""
+        
+        # Calculate p-values
+        p_value_one_tail = np.sum(bootstrap_slopes <= self.test_slope) / len(bootstrap_slopes)
+        
+        # Effect size: how many standard deviations below the null distribution
+        null_mean = np.mean(bootstrap_slopes)
+        null_std = np.std(bootstrap_slopes)
+        effect_size = (null_mean - self.test_slope) / null_std if null_std > 0 else 0
+        
+        self.bootstrap_results = {
+            'test_slope': self.test_slope,
+            'test_r2': self.test_r2,
+            # 'recent_historical_trend': self.recent_historical_trend,
+            'bootstrap_slopes': bootstrap_slopes,
+            'p_value_one_tail': p_value_one_tail,
+            'significant_at_0.1': p_value_one_tail < 0.1,
+            'significant_at_0.05': p_value_one_tail < 0.05,
+            'significant_at_0.01': p_value_one_tail < 0.01,
+            'null_hypothesis': null_hypothesis,
+            'bootstrap_method': bootstrap_method,
+            'effect_size': effect_size,
+            'null_mean': null_mean,
+            'null_std': null_std,
+            'n_bootstrap': n_bootstrap,
+            'autocorr_phi': self.autocorr_params['phi'],
+            # 'n_segments': len(self.optimal_segments['best']['segments'])
+        }
+        
+        print(f"Results:")
+        print(f"  P-value: {p_value_one_tail:.4f}")
+        print(f"  Significant at α=0.05: {self.bootstrap_results['significant_at_0.05']}")
+        print(f"  Effect size: {effect_size:.2f} standard deviations")
+        
+        return self.bootstrap_results
+    
+    def _generate_bootstrap_slopes(self, n_bootstrap: int, null_hypothesis: str, 
+                                  bootstrap_method: str) -> np.ndarray:
+        """Generate bootstrap slope distribution."""
         bootstrap_slopes = []
-        n_points = len(self.test_data)
-
-        # Use mean emissions as baseline for null hypothesis
+        n_test_points = len(self.test_data)
+        years = np.arange(2020, 2020 + n_test_points)  # Arbitrary years for test
+        
+        # Baseline emissions level
         baseline_emissions = np.mean(self.test_data["emissions"])
-
-        for _ in range(n_bootstrap):
-            # Generate null hypothesis data (zero trend + noise)
-            years = np.arange(2020, 2020 + n_points)  # Arbitrary years
-            null_emissions = np.full(
-                n_points, baseline_emissions
-            ) + self.noise_generator(n_points)
-
+        
+        # Null hypothesis trend
+        if null_hypothesis == "recent_trend":
+            null_trend = self.recent_historical_trend
+        else:  # zero_trend
+            null_trend = 0.0
+        
+        for i in range(n_bootstrap):
+            # Generate null hypothesis emissions trajectory
+            trend_component = null_trend * (years - years[0])
+            base_emissions = baseline_emissions + trend_component
+            
+            # Add autocorrelated noise
+            if bootstrap_method == "ar_bootstrap" and self.autocorr_params['has_autocorr']:
+                # Use AR(1) noise generator
+                noise = self.noise_generator(n_test_points, initial_value=0)
+                #TODO: Should there be an ability to bring block bootstrap and AR bootstrap together?
+            elif bootstrap_method == "block_bootstrap":
+                # Simple block bootstrap (for demo - could be improved)
+                block_size = max(2, n_test_points // 2)
+                noise = self._block_bootstrap_sample(block_size)
+            else:  # white_noise
+                noise = np.random.normal(0, self.autocorr_params['sigma_residuals'], n_test_points)
+            
+            null_emissions = base_emissions + noise
+            
             # Calculate slope
             X = years.reshape(-1, 1)
             model = LinearRegression()
             model.fit(X, null_emissions)
             bootstrap_slopes.append(model.coef_[0])
-
+        
         return np.array(bootstrap_slopes)
-
-    def _calculate_p_value(
-        self, bootstrap_slopes: np.ndarray, observed_slope: float
-    ) -> float:
-        """Calculate one-tailed p-value."""
-        # Testing for decline
-        return np.sum(bootstrap_slopes <= observed_slope) / len(bootstrap_slopes)
+    
+    def _block_bootstrap_sample(self, block_size: int) -> np.ndarray:
+        """Generate a block bootstrap sample from residuals."""
+        n_needed = len(self.test_data)
+        residuals = self.residuals
+        
+        if len(residuals) < block_size:
+            return np.random.choice(residuals, n_needed, replace=True)
+        
+        # Generate blocks
+        sample = []
+        while len(sample) < n_needed:
+            start_idx = np.random.randint(0, len(residuals) - block_size + 1)
+            block = residuals[start_idx:start_idx + block_size]
+            sample.extend(block)
+        
+        return np.array(sample[:n_needed])
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
@@ -637,6 +636,7 @@ class EmissionsPeakTest:
             raise ValueError("Must run bootstrap test first")
 
         results = self.bootstrap_results
+        strength = None
 
         # Determine trend direction
         if results["test_slope"] < 0:
@@ -647,22 +647,21 @@ class EmissionsPeakTest:
             trend_desc = "increasing"
 
         # Statistical significance
-        if results["significant_one_tail"]:
-            if results["p_value_one_tail"] < 0.01:
-                strength = "very strong"
-            elif results["p_value_one_tail"] < 0.05:
-                strength = "strong"
-            else:
-                strength = "moderate"
+        if results["significant_at_0.01"]:
+            strength = "very strong"
+        elif results["significant_at_0.05"]:
+            strength = "strong"
+        elif results["significant_at_0.1"]:
+            strength = "moderate"
             significance = f"{strength} evidence"
         else:
             significance = "insufficient evidence"
 
         # Peak conclusion
-        if direction == "decline" and results["significant_one_tail"]:
-            peak_conclusion = "Strong evidence that CO₂ emissions have peaked"
-            confidence = "high"
-        elif direction == "decline" and not results["significant_one_tail"]:
+        if direction == "decline" and strength is not None:
+            peak_conclusion = "Evidence that CO₂ emissions have peaked"
+            confidence = strength
+        elif direction == "decline":
             peak_conclusion = (
                 "Declining trend present but not statistically significant"
             )
@@ -674,7 +673,7 @@ class EmissionsPeakTest:
         interpretation = {
             "direction": direction,
             "trend_description": trend_desc,
-            "significance": significance,
+            # "significance": significance,
             "peak_conclusion": peak_conclusion,
             "confidence_in_peak": confidence,
             "p_value": f"{results['p_value_one_tail']:.4f}",
@@ -927,19 +926,19 @@ if __name__ == "__main__":
         "gcb_hist_co2.csv",
         emissions_col="fossil_co2_emissions",
         year_range=range(1970, 2023),
-    ).characterize_noise(
-        method="hodrick_prescott",
-        distribution="normal",
-    ).set_test_data(
+    )
+    
+    peak_test.characterize_noise(method="hodrick_prescott")
+    peak_test.create_noise_generator()
+    peak_test.set_test_data(
         [
             (2025, 37700),
             (2026, 37400),
             (2027, 37100),
-            # (2028, 37100)
+            # (2028, 37400)
         ]
-    ).run_bootstrap_test(
-        n_bootstrap=1000, alpha=0.05
     )
+    peak_test.run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
 
     # Get interpretation
     interpretation = peak_test.interpret_results(verbose=True)
