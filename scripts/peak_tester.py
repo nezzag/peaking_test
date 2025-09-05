@@ -85,7 +85,7 @@ class EmissionsPeakTest:
         """
         self.historical_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
-        self.noise_params: Optional[Dict] = None
+        self.recent_historical_trend: Optional[float] = None
         self.noise_generator: Optional[Callable] = None
         self.bootstrap_results: Optional[Dict] = None
         self.residuals: Optional[pd.Series] = None
@@ -300,56 +300,6 @@ class EmissionsPeakTest:
         - use_segmentation_data: If True, use same data as segmentation
         """
 
-        # if self.optimal_segments is None:
-        #     raise ValueError("No segmentation run yet. Run optimize_segments() first.")
-        
-        # if use_segmentation_data:
-        #     if hasattr(self, 'segmentation_data_version'):
-        #         data_version = self.segmentation_data_version
-        #     else:
-        #         # Fall back to default if segmentation_data_version not set
-        #         data_version = 'excluded'  # or whatever default you prefer
-    
-        # # Select appropriate data  
-        # if data_version == 'raw':
-        #     working_data = self.historical_data_raw
-        # elif data_version == 'excluded':
-        #     working_data = self.historical_data_excluded
-        # elif data_version == 'interpolated': 
-        #     working_data = self.historical_data_interpolated
-        # else:
-        #     raise ValueError("data_version must be 'raw', 'excluded', or 'interpolated'")
-        
-        # print(f"Analyzing autocorrelation using {data_version} data ({len(working_data)} points)")
-
-        # Extract residuals from segments but use working_data for temporal ordering
-        # segments = self.optimal_segments['best']['segments']
-        # residuals_with_years = []
-
-        # # Get residuals from segmentation (which used segmentation data)
-        # for segment in segments:
-        #     X = segment['years'].reshape(-1, 1)
-        #     y = segment['emissions']
-        #     model = LinearRegression()
-        #     model.fit(X, y)
-        #     residuals = y - model.predict(X)
-            
-        #     for i, year in enumerate(segment['years']):
-        #         residuals_with_years.append((year, residuals[i]))
-        
-        # # Sort by year and filter based on working_data
-        # residuals_with_years.sort()
-        # working_years = set(working_data['year'].values)
-
-        # Create residuals_temporal but only for years in working_data
-        # filtered_residuals = []
-        # for year, residual in residuals_with_years:
-        #     if year in working_years:
-        #         filtered_residuals.append((year, residual))
-
-        # # Now create residuals_temporal array
-        # self.residuals_temporal = np.array([r[1] for r in filtered_residuals])
-
         residuals = self.residuals.values
     
         # Continue with existing autocorrelation logic
@@ -370,7 +320,9 @@ class EmissionsPeakTest:
         else:
             phi_fitted = 0
             sigma_innovation = np.std(self.residuals)
+            mean_innovation = np.mean(self.residuals)
         
+        #TODO: Add more checks on autocorrelation, and explore this in more detail
         self.autocorr_params = {
             'phi': phi_fitted,
             'residuals': innovation_residuals,
@@ -425,6 +377,8 @@ class EmissionsPeakTest:
             self._analyze_autocorrelation()
         
         residuals = self.residuals
+        #TODO: Currently only loads up params from autocorrelation analysis -> if there is limited autocorrelation
+        # should we load a non-autocorrelated statistical analysis? (TBD)
         phi = self.autocorr_params['phi']
         sigma = self.autocorr_params['sigma_residuals']
         mean = self.autocorr_params['mean_residuals']
@@ -472,7 +426,7 @@ class EmissionsPeakTest:
         
         return self.noise_generator
     
-    def set_test_data(self, test_data: List[Tuple[int, float]]) -> "EmissionsPeakTest":
+    def set_test_data(self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
 
@@ -482,6 +436,15 @@ class EmissionsPeakTest:
         Returns:
             Self for method chaining
         """
+
+        recent_data = self.historical_data.tail(recent_years_for_trend)
+        X_recent = recent_data["year"].values.reshape(-1, 1)
+        y_recent = recent_data["emissions"].values
+        
+        model_recent = LinearRegression()
+        model_recent.fit(X_recent, y_recent)
+        self.recent_historical_trend = model_recent.coef_[0]
+        
 
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
@@ -493,6 +456,7 @@ class EmissionsPeakTest:
             f"Test data set: {self.test_data['year'].min()}-{self.test_data['year'].max()}"
         )
         print(f"Test slope: {self.test_slope:.2f} Mt/year (R² = {self.test_r2:.3f})")
+        print(f"Recent historical trend: {self.recent_historical_trend:.2f} Mt/yr")
 
         return self
 
@@ -539,7 +503,7 @@ class EmissionsPeakTest:
         self.bootstrap_results = {
             'test_slope': self.test_slope,
             'test_r2': self.test_r2,
-            # 'recent_historical_trend': self.recent_historical_trend,
+            'recent_historical_trend': self.recent_historical_trend,
             'bootstrap_slopes': bootstrap_slopes,
             'p_value_one_tail': p_value_one_tail,
             'significant_at_0.1': p_value_one_tail < 0.1,
@@ -750,24 +714,7 @@ class EmissionsPeakTest:
             label="Recent test data",
         )
 
-        for period in list(self.trend_info.keys()):
-            trend_data = self.trend_info[period]
-            x_trend = range(trend_data["year_min"], trend_data["year_max"] + 1)
-            y_trend = trend_data["slope"] * x_trend + trend_data["intercept"]
-            ax.plot(x_trend, y_trend)
-
-            xmin = ax.get_xlim()[0]
-            ymin = ax.get_ylim()[0]
-            xmax = ax.get_xlim()[1]
-            ymax = ax.get_ylim()[1]
-
-            ax.text(
-                (np.mean(x_trend) - xmin) / (xmax - xmin) + 0.02,
-                (np.mean(y_trend) - ymin) / (ymax - ymin) - 0.02,
-                "R$^{2}$ = " + "{0:.2f}".format(trend_data["r2"]),
-                transform=ax.transAxes,
-            )
-
+        #TODO Add the signal + noise components in a separate plot
         ax.set_xlabel("Year")
         ax.set_ylabel("CO₂ Emissions (Mt)")
         ax.set_title("Historical CO₂ Emissions and Test Data")
@@ -786,16 +733,17 @@ class EmissionsPeakTest:
         )
 
         # Overlay fitted distribution
-        if self.noise_params["type"] == "normal":
-            x_range = np.linspace(self.residuals.min(), self.residuals.max(), 100)
-            fitted_density = stats.norm.pdf(
-                x_range, self.noise_params["mu"], self.noise_params["sigma"]
-            )
-            ax.plot(x_range, fitted_density, "r-", linewidth=2, label="Fitted normal")
+        #TODO: Does this make sense to do with an autocorrelated system?
+        # if self.noise_params["type"] == "normal":
+        #     x_range = np.linspace(self.residuals.min(), self.residuals.max(), 100)
+        #     fitted_density = stats.norm.pdf(
+        #         x_range, self.noise_params["mu"], self.noise_params["sigma"]
+        #     )
+        #     ax.plot(x_range, fitted_density, "r-", linewidth=2, label="Fitted normal")
 
         ax.set_xlabel("Residuals (Mt)")
         ax.set_ylabel("Density")
-        ax.set_title(f'Noise Distribution (σ = {self.noise_params["sigma"]:.0f} Mt)')
+        ax.set_title(f'Noise Distribution') #(σ = {self.noise_params["sigma"]:.0f} Mt)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -823,7 +771,7 @@ class EmissionsPeakTest:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_summary_statistics(self, ax: plt.Axes) -> None:
+    def _plot_summary_statistics(self, ax: plt.Axes, signif_level: float = 0.1) -> None:
         """Plot summary statistics and interpretation."""
         ax.axis("off")
 
@@ -841,12 +789,13 @@ class EmissionsPeakTest:
         Bootstrap Analysis:
         • Samples: {results['n_bootstrap']:,}
         • P-value: {results['p_value_one_tail']:.4f}
-        • Significant: {results['significant_one_tail']}
+        • Significant: {results[f'significant_at_{signif_level}']}
         
         Noise Characteristics:
         • Method: {self.trend_info['method']}
-        • Std Dev: {self.noise_params['sigma']:.1f} Mt
-        • Distribution: {self.noise_params['type']}
+        • Autocorrelation present: {self.autocorr_params['has_autocorr']}
+        • Autocorrelation: {self.autocorr_params['phi']}
+        • Std Dev: {self.autocorr_params['sigma_residuals']:.1f} Mt
         
         CONCLUSION:
         """
@@ -864,7 +813,7 @@ class EmissionsPeakTest:
             fontfamily="monospace",
         )
 
-    def export_results(self, filepath: str) -> None:
+    def export_results(self, filepath: str, signif_level: float=0.1) -> None:
         """
         Export analysis results to CSV file.
 
@@ -883,10 +832,9 @@ class EmissionsPeakTest:
                 "test_slope_mt_per_year",
                 "test_r_squared",
                 "p_value_one_tail",
-                "p_value_two_tail",
-                "significant_at_0.05",
+                "significance",
                 "n_bootstrap_samples",
-                "noise_std_mt",
+                # "noise_std_mt",
                 "n_test_years",
                 "test_year_start",
                 "test_year_end",
@@ -898,10 +846,9 @@ class EmissionsPeakTest:
                 self.bootstrap_results["test_slope"],
                 self.bootstrap_results["test_r2"],
                 self.bootstrap_results["p_value_one_tail"],
-                self.bootstrap_results["p_value_two_tail"],
-                self.bootstrap_results["significant_one_tail"],
+                self.bootstrap_results[f'significant_at_{signif_level}'],
                 self.bootstrap_results["n_bootstrap"],
-                self.noise_params["sigma"],
+                # self.noise_params["sigma"],
                 len(self.test_data),
                 self.test_data["year"].min(),
                 self.test_data["year"].max(),
@@ -928,7 +875,7 @@ if __name__ == "__main__":
         year_range=range(1970, 2023),
     )
     
-    peak_test.characterize_noise(method="hodrick_prescott")
+    peak_test.characterize_noise(method="loess")
     peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
@@ -944,7 +891,7 @@ if __name__ == "__main__":
     interpretation = peak_test.interpret_results(verbose=True)
 
     # Create visualizations
-    # fig = peak_test.plot_analysis()
+    fig = peak_test.plot_analysis()
 
     # Export results
     # peak_test.export_results('_peak_test_results.csv')
