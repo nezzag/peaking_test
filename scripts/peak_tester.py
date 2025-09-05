@@ -44,6 +44,9 @@ from scipy import stats
 from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.stattools import acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.filters.hp_filter import hpfilter
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.regression.linear_model import OLS
 from typing import List, Tuple, Dict, Optional, Callable, Union
 from statsmodels.tsa.arima.model import ARIMA
 import warnings
@@ -172,8 +175,7 @@ class EmissionsPeakTest:
 
     def characterize_noise(
         self,
-        method: str = "all_data",
-        segment_length: int = 10,
+        method: str = "hp",
         distribution: str = "normal",
         ignore_years: list = None,
         clip_distribution: tuple = None,
@@ -193,8 +195,11 @@ class EmissionsPeakTest:
             raise ValueError("Must load historical data first")
 
         self.residuals, self.trend_info = self._calculate_residuals(
-            method, segment_length
+            method
         )
+
+        self.autocorr_params = self._analyze_autocorrelation()
+        
         self.noise_params, self.noise_generator = self._fit_noise_distribution(
             ignore_years, clip_distribution, distribution
         )
@@ -207,72 +212,184 @@ class EmissionsPeakTest:
 
         return self
 
-    def _calculate_residuals(
-        self, method: str, segment_length: int
-    ) -> Tuple[pd.Series, Dict]:
-        """Calculate residuals from trend fitting."""
+    def _calculate_residuals(self, method: str) -> Tuple[pd.Series, Dict]:
         residuals_list = []
         trend_info = {}
 
-        if method == "all_data":
-            X = self.historical_data["year"].values.reshape(-1, 1)
-            y = self.historical_data["emissions"].values
+        years = self.historical_data["year"].values
+        emissions = self.historical_data["emissions"].values
 
-            model = LinearRegression()
-            model.fit(X, y)
-            trend = model.predict(X)
-            residuals = y - trend
-
-            residuals_list.append(pd.Series(index=X.reshape(X.shape[0]),data=residuals))
-            trend_info["all_data"] = {
-                "year_min": X.min(),
-                "year_max": X.max(),
-                "slope": model.coef_[0],
-                "intercept": model.intercept_,
-                "r2": model.score(X, y),
-                "n_points": len(y),
+        if method in ["hp", "hodrick_prescott"]:
+            # HP filter
+            cycle, trend = hpfilter(emissions, lamb=100)  #100 is typical for annual data
+            residuals = emissions - trend
+            residuals_list.append(pd.Series(index=years, data=residuals))
+            trend_info = {
+                'method': 'Hodrick-Prescott filter',
+                "trend": pd.Series(trend, index=self.historical_data.index),
+                "n_points": len(emissions),
+                'parameters': {'lambda': 100}
             }
 
-        elif method == "segments":
-            years = self.historical_data["year"].values
-            emissions = self.historical_data["emissions"].values
+        elif method == "hamilton":
+            """Fit Hamilton's regression-based method."""
+            h = 4
+            p = 4
+            n = len(years)
+            y = emissions.copy()
+            
+            if n <= p:
+                return None
+            
+            # Build regression matrix
+            X = np.ones((n - p, p))
+            Y = y[p:]
+            
+            for i in range(p):
+                lag = h - i
+                X[:, i] = y[p - lag : n - lag]
+            
+            # Fit regression
+            model = OLS(Y, X).fit()
+            
+            # Create full series
+            full_trend = np.full(n, np.nan)
+            full_cycle = np.full(n, np.nan)
+            
+            full_trend[p:] = model.fittedvalues
+            full_cycle[p:] = model.resid
 
-            start_year = years[0]
-            end_year = years[-1]
+            residuals_list.append(pd.Series(index=years[p:], data=model.resid))
+            
+            # Fill initial periods
+            # if max_lag > 0:
+            #     trend_slope = (model.fittedvalues[1] - model.fittedvalues[0]) if len(model.fittedvalues) > 1 else 0
+            #     for i in range(max_lag):
+            #         full_trend[i] = model.fittedvalues[0] - trend_slope * (max_lag - i)
+            #         full_cycle[i] = y[i] - full_trend[i]
+            
+            trend_info = {
+                'method': 'Hamilton (2018)',
+                'trend': pd.Series(full_trend, index=self.historical_data.index),
+                # 'cycle': pd.Series(full_cycle, index=self.historical_data.index),
+                'parameters': {'h': h, 'p': p},
+                'parameter_info': f'h={h} (forecast horizon), p={p} (lags)',
+                'r_squared': model.rsquared,
+                'model': model
+            }
 
-            for year_start in range(start_year, end_year, segment_length):
-                year_end = min(year_start + segment_length, end_year)
-
-                mask = (years >= year_start) & (years <= year_end)
-                # Check that there are enough data points (>=3) in each segment to calculate a trend and residuals
-                if np.sum(mask) < 3:
-                    continue
-
-                X_seg = years[mask].reshape(-1, 1)
-                y_seg = emissions[mask]
-
-                model = LinearRegression()
-                model.fit(X_seg, y_seg)
-                trend_seg = model.predict(X_seg)
-                residuals_seg = y_seg - trend_seg
-
-                residuals_list.append(
-                    pd.Series(index=X_seg.reshape(X_seg.shape[0]),data=residuals_seg)
-                )
-                
-                trend_info[f"{year_start}-{year_end}"] = {
-                    "year_min": year_start,
-                    "year_max": year_end,
-                    "slope": model.coef_[0],
-                    "intercept": model.intercept_,
-                    "r2": model.score(X_seg, y_seg),
-                    "n_points": len(y_seg),
-                }
+        elif method == "loess":
+            # LOESS smoothing
+            frac = 0.3  # Smoothing parameter; you may want to make this adjustable
+            smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
+            residuals = emissions - smoothed
+            residuals_list.append(pd.Series(index=years, data=residuals))
+            trend_info = {
+                "method": 'LOESS',
+                "trend": smoothed,
+                "parameter_info": {'fraction':frac},
+                "n_points": len(smoothed),
+            }
         else:
-            raise ValueError("Method must be 'all_data' or 'segments'")
+            raise ValueError("Method must be one of 'hp', 'hamilton', or 'loess'")
 
         residuals = pd.concat(residuals_list)
         return residuals, trend_info
+
+    def _analyze_autocorrelation(self) -> Dict:
+        """
+        Analyze autocorrelation in temporally-ordered residuals.
+        Parameters:
+        - data_version: 'raw', 'excluded', 'interpolated' 
+        - use_segmentation_data: If True, use same data as segmentation
+        """
+
+        # if self.optimal_segments is None:
+        #     raise ValueError("No segmentation run yet. Run optimize_segments() first.")
+        
+        # if use_segmentation_data:
+        #     if hasattr(self, 'segmentation_data_version'):
+        #         data_version = self.segmentation_data_version
+        #     else:
+        #         # Fall back to default if segmentation_data_version not set
+        #         data_version = 'excluded'  # or whatever default you prefer
+    
+        # # Select appropriate data  
+        # if data_version == 'raw':
+        #     working_data = self.historical_data_raw
+        # elif data_version == 'excluded':
+        #     working_data = self.historical_data_excluded
+        # elif data_version == 'interpolated': 
+        #     working_data = self.historical_data_interpolated
+        # else:
+        #     raise ValueError("data_version must be 'raw', 'excluded', or 'interpolated'")
+        
+        # print(f"Analyzing autocorrelation using {data_version} data ({len(working_data)} points)")
+
+        # Extract residuals from segments but use working_data for temporal ordering
+        # segments = self.optimal_segments['best']['segments']
+        # residuals_with_years = []
+
+        # # Get residuals from segmentation (which used segmentation data)
+        # for segment in segments:
+        #     X = segment['years'].reshape(-1, 1)
+        #     y = segment['emissions']
+        #     model = LinearRegression()
+        #     model.fit(X, y)
+        #     residuals = y - model.predict(X)
+            
+        #     for i, year in enumerate(segment['years']):
+        #         residuals_with_years.append((year, residuals[i]))
+        
+        # # Sort by year and filter based on working_data
+        # residuals_with_years.sort()
+        # working_years = set(working_data['year'].values)
+
+        # Create residuals_temporal but only for years in working_data
+        # filtered_residuals = []
+        # for year, residual in residuals_with_years:
+        #     if year in working_years:
+        #         filtered_residuals.append((year, residual))
+
+        # # Now create residuals_temporal array
+        # self.residuals_temporal = np.array([r[1] for r in filtered_residuals])
+
+        residuals = self.residuals.values
+    
+        # Continue with existing autocorrelation logic
+        acf_values = acf(residuals, nlags=5, fft=True)
+        phi = acf_values[1] if len(acf_values) > 1 else 0
+        
+        # Simple AR(1) model fitting
+        if len(residuals) > 1:
+            y = residuals[1:]
+            X = residuals[:-1].reshape(-1, 1)
+            
+            ar_model = LinearRegression()
+            ar_model.fit(X, y)
+            phi_fitted = ar_model.coef_[0]
+            innovation_residuals = y - ar_model.predict(X)
+            sigma_innovation = np.std(innovation_residuals)
+        else:
+            phi_fitted = 0
+            sigma_innovation = np.std(self.residuals)
+        
+        self.autocorr_params = {
+            'phi': phi_fitted,
+            'sigma_innovation': sigma_innovation,
+            'acf_lag1': phi,
+            'has_autocorr': abs(phi) > 0.1,
+            'is_stationary': abs(phi_fitted) < 1
+        }
+        
+        print(f"Autocorrelation analysis:")
+        print(f"  Lag-1 autocorr: {phi:.3f}")
+        print(f"  AR(1) φ: {phi_fitted:.3f}")
+        print(f"  Innovation σ: {sigma_innovation:.1f}")
+        print(f"  Has significant autocorr: {self.autocorr_params['has_autocorr']}")
+        
+        return self.autocorr_params
+
 
     def _fit_noise_distribution(
             self,
@@ -728,7 +845,7 @@ class EmissionsPeakTest:
         • Significant: {results['significant_one_tail']}
         
         Noise Characteristics:
-        • Method: {list(self.trend_info.keys())[0] if len(self.trend_info) == 1 else 'segments'}
+        • Method: {self.trend_info['method']}
         • Std Dev: {self.noise_params['sigma']:.1f} Mt
         • Distribution: {self.noise_params['type']}
         
@@ -809,9 +926,9 @@ if __name__ == "__main__":
     peak_test.load_historical_data(
         "gcb_hist_co2.csv",
         emissions_col="fossil_co2_emissions",
-        year_range=range(1970, 2020),
+        year_range=range(1970, 2023),
     ).characterize_noise(
-        method="segments",  # Try 'segments' for alternative approach
+        method="hodrick_prescott",
         distribution="normal",
     ).set_test_data(
         [
