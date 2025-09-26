@@ -11,7 +11,7 @@ Usage:
     peak_test = EmissionsPeakTest()
     
     # Load your data
-    peak_test.load_historical_data('path/to/your/data.csv')  # or use simulate_data()
+    peak_test.load_historical_data('path/to/your/data.csv')
     
     # Characterize noise
     peak_test.characterize_noise(method='all_data')  # or 'segments'
@@ -29,7 +29,7 @@ Usage:
     # Get interpretation
     interpretation = peak_test.interpret_results()
 
-Author: Neil Grant and Claire Fyson
+Authors: Neil Grant and Claire Fyson
 """
 
 # =================================
@@ -176,8 +176,8 @@ class EmissionsPeakTest:
     def characterize_noise(
         self,
         method: str = "hp",
-        ignore_years: list = None,
-        clip_distribution: tuple = None,
+        ignore_years: list = None, #TODO: Enable some years to be excluded from noise characterisation?
+        clip_distribution: tuple = None, #TODO: Clip noise distribution to e.g. 5-95 percentiles?
     ) -> "EmissionsPeakTest":
         """
         Characterize the noise distribution in historical emissions data.
@@ -302,18 +302,25 @@ class EmissionsPeakTest:
 
         residuals = self.residuals.values
     
-        # Continue with existing autocorrelation logic
-        acf_values = acf(residuals, nlags=5, fft=True)
+        # Calculate lag-1 autocorrelation via the acf function
+        # (this provides additional statistical outputs if desired, but not the residuals)
+        acf_values, _, pvalues = acf(residuals, nlags=5, qstat=True, fft=True)
         phi = acf_values[1] if len(acf_values) > 1 else 0
-        
+        p_autocorr = pvalues[1] if len(acf_values) > 1 else 1
+
         # Simple AR(1) model fitting
         if len(residuals) > 1:
             y = residuals[1:]
             X = residuals[:-1].reshape(-1, 1)
             
-            ar_model = LinearRegression()
+            ar_model = LinearRegression() #TODO: Currently has non-zero intercept, which is weird...
             ar_model.fit(X, y)
             phi_fitted = ar_model.coef_[0]
+
+            # Check that manual fit gives similar to the ACF results
+            assert np.isclose(phi_fitted, phi, rtol=1e-2)
+
+            #Innovation residuals are the residuals left after accounting for autocorrelation
             innovation_residuals = y - ar_model.predict(X)
             sigma_innovation = np.std(innovation_residuals)
             mean_innovation = np.mean(innovation_residuals)
@@ -328,24 +335,24 @@ class EmissionsPeakTest:
             'residuals': innovation_residuals,
             'sigma_residuals': sigma_innovation,
             'mean_residuals': mean_innovation,
-            'acf_lag1': phi,
-            'has_autocorr': abs(phi) > 0.1,
-            'is_stationary': abs(phi_fitted) < 1
+            'has_autocorr': abs(phi_fitted) > 0.1,
+            'likelihood_of_autocorr': 1 - p_autocorr
         }
         
         print(f"Autocorrelation analysis:")
-        print(f"  Lag-1 autocorr: {phi:.3f}")
-        print(f"  AR(1) φ: {phi_fitted:.3f}")
-        print(f"  Innovation σ: {sigma_innovation:.1f}")
+        print(f"  Lag-1 autocorr: {phi_fitted:.3f}")
+        print(f"  Residual σ (post-autocorrelation): {sigma_innovation:.1f}")
         print(f"  Has significant autocorr: {self.autocorr_params['has_autocorr']}")
+        print(f"  Likelihood of autocorr: {self.autocorr_params['likelihood_of_autocorr']}")
         
         return self.autocorr_params
 
+    # =================================
+    # C) Create a noise generator that can randomly reproduce noise
+    # =================================
 
     def create_noise_generator(
-            self,
-            ignore_years: list = None,
-            clip_distribution: tuple = None):
+            self):
         """
         Create noise generator
 
@@ -366,8 +373,6 @@ class EmissionsPeakTest:
             generator: Function to generate noise samples
         """
 
-
-        """Create autocorrelation-aware noise generator."""
         if self.residuals is None:
             raise ValueError(
                 "Must call characterize_noise() first to calculate residuals"
@@ -375,28 +380,13 @@ class EmissionsPeakTest:
     
         if self.autocorr_params is None:
             self._analyze_autocorrelation()
-        
-        residuals = self.residuals
+  
         #TODO: Currently only loads up params from autocorrelation analysis -> if there is limited autocorrelation
         # should we load a non-autocorrelated statistical analysis? (TBD)
         phi = self.autocorr_params['phi']
         sigma = self.autocorr_params['sigma_residuals']
         mean = self.autocorr_params['mean_residuals']
         residuals_post_ar = self.autocorr_params['residuals']
-
-        # Only either drop specific years from the investigation, or clip the distribution
-        # TODO: This would need to be moved to prior to the analysis of autocorrelation if we want to clip,
-        # otherwise autocorrelation parameters are still based on this. Currentl doesn't do anything
-        if ignore_years:
-            residuals = residuals.drop(ignore_years)
-
-        elif clip_distribution:
-            if len(clip_distribution) != 2:
-                raise ValueError('Clip_distribution must be a tuple of type (float,float)')
-            residuals = residuals[
-                (residuals >= residuals.quantile(clip_distribution[0])) & 
-                (residuals <= residuals.quantile(clip_distribution[1]))]
-        
         
         if self.autocorr_params['has_autocorr'] and self.autocorr_params['is_stationary']:
             print(f"Using AR(1) noise generator with φ={phi:.3f}")
@@ -617,12 +607,13 @@ class EmissionsPeakTest:
             strength = "strong"
         elif results["significant_at_0.1"]:
             strength = "moderate"
-            significance = f"{strength} evidence"
         else:
-            significance = "insufficient evidence"
+            strength = "insufficient"
+
+        significance = f"{strength} evidence"
 
         # Peak conclusion
-        if direction == "decline" and strength is not None:
+        if direction == "decline" and strength != "insufficient":
             peak_conclusion = "Evidence that CO₂ emissions have peaked"
             confidence = strength
         elif direction == "decline":
@@ -891,7 +882,7 @@ if __name__ == "__main__":
     interpretation = peak_test.interpret_results(verbose=True)
 
     # Create visualizations
-    fig = peak_test.plot_analysis()
+    peak_test.plot_analysis()
 
     # Export results
     # peak_test.export_results('_peak_test_results.csv')

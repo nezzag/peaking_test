@@ -10,13 +10,13 @@ The repository contains the following core folders:
 
 - `data/` can be used to store data (largely emissions timeseries that are being tested)
 
-- `notebooks` is where notebooks that enable exploratory analysis to be conducted exist
+- `notebooks/` is where notebooks that enable exploratory analysis to be conducted exist
 
-- `scripts` is where the EmissionsPeakTest class is defined, and has a default implementation of this using the Global Carbon Budget data
+- `scripts/` is where the EmissionsPeakTest class is defined, and has a default implementation of this using the Global Carbon Budget data
 
 ## Getting started
 - Download and clone this repository.
-- Create project enviroment using the config file in this directory (optional, the cpt_generic_environment.yml is also sufficient for this repository):
+- Create project enviroment using the config file in this directory
 
 ```
 mamba env create -f environment.yml

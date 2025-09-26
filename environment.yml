@@ -12,3 +12,5 @@ dependencies:
 - pip
 - pip:
   - pandas_indexing
+  - pylint==2.15.0
+  - astroid==2.12.4
