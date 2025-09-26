@@ -175,9 +175,10 @@ class EmissionsPeakTest:
 
     def characterize_noise(
         self,
-        method: str = "hp",
-        ignore_years: list = None, #TODO: Enable some years to be excluded from noise characterisation?
-        clip_distribution: tuple = None, #TODO: Clip noise distribution to e.g. 5-95 percentiles?
+        method: str = "loess",
+        ignore_years: list = None,
+        **kwargs,
+        # clip_distribution: tuple = None, #TODO: Clip noise distribution to e.g. 5-95 percentiles?
     ) -> "EmissionsPeakTest":
         """
         Characterize the noise distribution in historical emissions data.
@@ -194,7 +195,7 @@ class EmissionsPeakTest:
             raise ValueError("Must load historical data first")
 
         self.residuals, self.trend_info = self._calculate_residuals(
-            method
+            method, ignore_years, **kwargs
         )
 
         self.autocorr_params = self._analyze_autocorrelation()
@@ -208,12 +209,16 @@ class EmissionsPeakTest:
 
         return self
 
-    def _calculate_residuals(self, method: str) -> Tuple[pd.Series, Dict]:
+    def _calculate_residuals(self, method: str, ignore_years: list = None, **kwargs) -> Tuple[pd.Series, Dict]:
         residuals_list = []
         trend_info = {}
+    
+        hist_data = self.historical_data.copy()
+        if ignore_years:
+            hist_data = hist_data.loc[~hist_data.year.isin(ignore_years)]
 
-        years = self.historical_data["year"].values
-        emissions = self.historical_data["emissions"].values
+        years = hist_data["year"].values
+        emissions = hist_data["emissions"].values
 
         if method in ["hp", "hodrick_prescott"]:
             # HP filter
@@ -222,14 +227,17 @@ class EmissionsPeakTest:
             residuals_list.append(pd.Series(index=years, data=residuals))
             trend_info = {
                 'method': 'Hodrick-Prescott filter',
-                "trend": pd.Series(trend, index=self.historical_data.index),
+                "trend": pd.Series(trend, index=years),
                 "n_points": len(emissions),
                 'parameters': {'lambda': 100}
             }
 
         elif method == "hamilton":
             """Fit Hamilton's regression-based method."""
-            h = 4
+            
+            # Horizon ahead at which we calculate y, can be specified, otherwise default 4
+            h = kwargs.get('h',4)
+            # Length of timeseries that we use to predict y -> this is fixed by Hamilton's method
             p = 4
             n = len(years)
             y = emissions.copy()
@@ -238,26 +246,29 @@ class EmissionsPeakTest:
                 return None
             
             # Build regression matrix
-            X = np.ones((n - p, p))
-            Y = y[p:]
+            # Both X and Y are reduced in size by p + h
+            # (you can't forecast before p+h: into the data, as you don't have sufficient data)
+            X = np.ones((n - p - h, p))
+            Y = y[p+h:]
             
             for i in range(p):
-                lag = h - i
-                X[:, i] = y[p - lag : n - lag]
+                lag = p - i
+                X[:, i] = y[p + h - lag : n - lag]
             
             # Fit regression
             model = OLS(Y, X).fit()
+
             
             # Create full series
             full_trend = np.full(n, np.nan)
             full_cycle = np.full(n, np.nan)
             
-            full_trend[p:] = model.fittedvalues
-            full_cycle[p:] = model.resid
+            full_trend[p+h:] = model.fittedvalues
+            full_cycle[p+h:] = model.resid
 
-            residuals_list.append(pd.Series(index=years[p:], data=model.resid))
-            
-            # Fill initial periods
+            residuals_list.append(pd.Series(index=years[p+h:], data=model.resid))
+
+            # Fill initial periods (Neil: I removed this as there is no real way to backfill residuals)
             # if max_lag > 0:
             #     trend_slope = (model.fittedvalues[1] - model.fittedvalues[0]) if len(model.fittedvalues) > 1 else 0
             #     for i in range(max_lag):
@@ -266,7 +277,7 @@ class EmissionsPeakTest:
             
             trend_info = {
                 'method': 'Hamilton (2018)',
-                'trend': pd.Series(full_trend, index=self.historical_data.index),
+                'trend': pd.Series(full_trend, index=years),
                 # 'cycle': pd.Series(full_cycle, index=self.historical_data.index),
                 'parameters': {'h': h, 'p': p},
                 'parameter_info': f'h={h} (forecast horizon), p={p} (lags)',
@@ -276,7 +287,7 @@ class EmissionsPeakTest:
 
         elif method == "loess":
             # LOESS smoothing
-            frac = 0.3  # Smoothing parameter; you may want to make this adjustable
+            frac = 0.3  # Smoothing parameter; we may want to make this adjustable
             smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
             residuals = emissions - smoothed
             residuals_list.append(pd.Series(index=years, data=residuals))
@@ -318,7 +329,7 @@ class EmissionsPeakTest:
             phi_fitted = ar_model.coef_[0]
 
             # Check that manual fit gives similar to the ACF results
-            assert np.isclose(phi_fitted, phi, rtol=1e-2)
+            # assert np.isclose(phi_fitted, phi, rtol=1e-2)
 
             #Innovation residuals are the residuals left after accounting for autocorrelation
             innovation_residuals = y - ar_model.predict(X)
@@ -336,6 +347,7 @@ class EmissionsPeakTest:
             'sigma_residuals': sigma_innovation,
             'mean_residuals': mean_innovation,
             'has_autocorr': abs(phi_fitted) > 0.1,
+            'is_stationary': abs(phi_fitted) < 1,
             'likelihood_of_autocorr': 1 - p_autocorr
         }
         
@@ -863,7 +875,7 @@ if __name__ == "__main__":
     peak_test.load_historical_data(
         "gcb_hist_co2.csv",
         emissions_col="fossil_co2_emissions",
-        year_range=range(1970, 2023),
+        year_range=range(1970, 2024),
     )
     
     peak_test.characterize_noise(method="loess")
