@@ -676,19 +676,36 @@ class EmissionsPeakTest:
         if self.bootstrap_results is None:
             raise ValueError("Must run bootstrap test first")
 
-        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        # fig, axes = plt.subplots(2, 3, figsize=figsize)
+
+        f = plt.figure(layout=None, figsize=(15,15))
+        gs = f.add_gridspec(nrows=16, ncols=7, left=0.05, right=0.75,
+                            hspace=0.1, wspace=0.05)
+
+        a0 = f.add_subplot(gs[:5, :3])
+        a1 = f.add_subplot(gs[:2, 4:])
+        a2 = f.add_subplot(gs[3:5, 4:])
+        a3 = f.add_subplot(gs[6:10, :3])
+        a4 = f.add_subplot(gs[6:10, 4:])
+        a5 = f.add_subplot(gs[11:, :])
+        axes = [a0, a1, a2, a3, a4, a5]
+
 
         # 1. Historical data with test data overlay
-        self._plot_historical_and_test_data(axes[0, 0])
+        self._plot_historical_and_test_data(axes[0])
 
-        # 2. Noise distribution
-        self._plot_noise_distribution(axes[0, 1])
+        # 2. Split of historical data into noise vs. signal
+        self._plot_historical_trend(axes[1])
+        self._plot_historical_noise(axes[2])
 
-        # 3. Bootstrap results
-        self._plot_bootstrap_results(axes[1, 0])
+        # 3. Noise distribution
+        self._plot_noise_distribution(axes[3])
 
-        # 4. Summary statistics
-        self._plot_summary_statistics(axes[1, 1])
+        # 4. Bootstrap results
+        self._plot_bootstrap_results(axes[4])
+
+        # 5. Summary statistics
+        self._plot_summary_statistics(axes[5])
 
         plt.tight_layout()
 
@@ -700,7 +717,7 @@ class EmissionsPeakTest:
         return
 
     def _plot_historical_and_test_data(self, ax: plt.Axes) -> None:
-        """Plot historical data with test data overlay and calculated trend lines."""
+        """Plot historical data with test data overlay"""
         ax.plot(
             self.historical_data["year"],
             self.historical_data["emissions"],
@@ -717,12 +734,46 @@ class EmissionsPeakTest:
             label="Recent test data",
         )
 
-        #TODO Add the signal + noise components in a separate plot
         ax.set_xlabel("Year")
         ax.set_ylabel("CO₂ Emissions (Mt)")
         ax.set_title("Historical CO₂ Emissions and Test Data")
         ax.legend()
         ax.grid(True, alpha=0.3)
+
+    def _plot_historical_trend(self, ax: plt.Axes) -> None:
+        """Plot historical trend data"""
+        ax.plot(
+            self.historical_data["year"],
+            self.trend_info["trend"],
+            "b-",
+            alpha=0.7,
+            label="Historical emissions",
+        )
+
+        ax.set_xlabel("Year")
+        ax.set_ylabel("CO₂ Emissions (Mt)")
+        ax.set_title("Historical Trend on CO₂ Emissions")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+
+    def _plot_historical_noise(self, ax: plt.Axes) -> None:
+        """Plot historical noise data"""
+        self.residuals.plot(
+            ax=ax,
+            label="Historical emissions",
+            color="orange",
+            style="-"
+        )
+
+        ax.set_xlabel("Year")
+        ax.set_ylabel("CO₂ Emissions (Mt)")
+        ax.set_title("Historical Residuals")
+        ax.legend()
+        ax.axhline(y=0,color='k',lw=1)
+        ax.grid(True, alpha=0.3)
+
+
 
     def _plot_noise_distribution(self, ax: plt.Axes) -> None:
         """Plot the fitted noise distribution."""
@@ -807,12 +858,13 @@ class EmissionsPeakTest:
         summary_text += interpretation["peak_conclusion"]
 
         ax.text(
-            0.05,
+            0.5,
             0.95,
             summary_text,
             transform=ax.transAxes,
             fontsize=10,
             verticalalignment="top",
+            horizontalalignment="center",
             fontfamily="monospace",
         )
 
