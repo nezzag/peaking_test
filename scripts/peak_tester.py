@@ -410,12 +410,16 @@ class EmissionsPeakTest:
         if self.autocorr_params['has_autocorr'] and self.autocorr_params['is_stationary']:
             print(f"Using AR(1) noise generator with φ={phi:.3f}")
             
-            def ar1_noise_generator(size: int, initial_value: float = 0) -> np.ndarray:
+            def ar1_noise_generator(size: int, initial_value: float | None = 0) -> np.ndarray:
                 """Generate AR(1) autocorrelated noise."""
                 #TODO: Think about t-distribution here instead of normal, and allowing non-zero mean
                 innovations = np.random.normal(0, sigma, size)
                 series = np.zeros(size)
-                series[0] = initial_value
+                if initial_value is None:
+                    # Draw a random start value based on the historical residuals
+                    series[0] = np.random.normal(0, self.residuals.abs().mean())
+                else:
+                    series[0] = initial_value
                 
                 for t in range(1, size):
                     series[t] = phi * series[t-1] + innovations[t]
@@ -546,7 +550,8 @@ class EmissionsPeakTest:
         """Generate bootstrap slope distribution."""
         bootstrap_slopes = []
         n_test_points = len(self.test_data)
-        years = np.arange(2020, 2020 + n_test_points)  # Arbitrary years for test
+
+        years = self.test_data.year.values # Arbitrary years for test
         
         # Baseline emissions level
         baseline_emissions = np.mean(self.test_data["emissions"])
@@ -566,13 +571,8 @@ class EmissionsPeakTest:
             
             # Add autocorrelated noise
             if bootstrap_method == "ar_bootstrap" and self.autocorr_params['has_autocorr']:
-                # Use AR(1) noise generator
-                noise = self.noise_generator(n_test_points, initial_value=0)
-                #TODO: Should there be an ability to bring block bootstrap and AR bootstrap together?
-            elif bootstrap_method == "block_bootstrap":
-                # Simple block bootstrap (for demo - could be improved)
-                block_size = max(2, n_test_points // 2)
-                noise = self._block_bootstrap_sample(block_size)
+                # Use AR(1) noise generator. This creates the noise for all n_test_points in one go
+                noise = self.noise_generator(n_test_points, initial_value=None)
             else:  # white_noise
                 noise = np.random.normal(0, self.autocorr_params['sigma_residuals'], n_test_points)
             
@@ -585,23 +585,6 @@ class EmissionsPeakTest:
             bootstrap_slopes.append(model.coef_[0])
         
         return np.array(bootstrap_slopes)
-    
-    def _block_bootstrap_sample(self, block_size: int) -> np.ndarray:
-        """Generate a block bootstrap sample from residuals."""
-        n_needed = len(self.test_data)
-        residuals = self.residuals
-        
-        if len(residuals) < block_size:
-            return np.random.choice(residuals, n_needed, replace=True)
-        
-        # Generate blocks
-        sample = []
-        while len(sample) < n_needed:
-            start_idx = np.random.randint(0, len(residuals) - block_size + 1)
-            block = residuals[start_idx:start_idx + block_size]
-            sample.extend(block)
-        
-        return np.array(sample[:n_needed])
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
