@@ -38,6 +38,7 @@ Authors: Neil Grant and Claire Fyson
 
 import numpy as np
 import pandas as pd
+import pandas_indexing as pix
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
@@ -98,8 +99,6 @@ class EmissionsPeakTest:
     def load_historical_data(
         self,
         data_source: Union[str, pd.DataFrame],
-        year_col: str = "year",
-        emissions_col: str = "emissions",
         year_range: range = range(1970, 2020),
     ) -> "EmissionsPeakTest":
         """
@@ -118,29 +117,37 @@ class EmissionsPeakTest:
             data_path = Path(__file__).resolve().parent / f"../data/{data_source}"
 
             try:
-                data = pd.read_csv(data_path)
+                data = pd.read_csv(data_path, index_col=[0,1,2])
             except Exception as e:
                 raise ValueError(f"Could not load data from {data_path}: {e}")
 
         elif isinstance(data_source, pd.DataFrame):
+            assert data_source.index.names == ['region','variable','unit']
             data = data_source.copy()
 
         else:
             raise ValueError("data_source must be a file path or DataFrame")
 
-        # Validate columns
-        if year_col not in data.columns or emissions_col not in data.columns:
-            raise ValueError(
-                f"Data must contain '{year_col}' and '{emissions_col}' columns"
-            )
+        self.variable = data.pix.unique('variable')[0]
+        self.unit = data.pix.unique('unit')[0]
+        # Cast into long-form and rename
+        data.columns = data.columns.astype(int)
+        data = pd.Series(index=data.columns,data=data.values.squeeze()).reset_index()
+        data.columns = ['year','emissions']
+        
+        # # Validate columns
+        # if year_col not in data.columns or emissions_col not in data.columns:
+        #     raise ValueError(
+        #         f"Data must contain '{year_col}' and '{emissions_col}' columns"
+        #     )
 
-        # Standardize column names
-        data = (
-            data[[year_col, emissions_col]]
-            .rename(columns={year_col: "year", emissions_col: "emissions"})
-            .sort_values("year")
-            .reset_index(drop=True)
-        )
+        # # Standardize column names
+        # data = (
+        #     data[[year_col, emissions_col]]
+        #     .rename(columns={year_col: "year", emissions_col: "emissions"})
+        #     .sort_values("year")
+        #     .reset_index(drop=True)
+        # )
 
         # Filter to the selected years
         self.historical_data = data.loc[data["year"].isin(year_range)]
@@ -457,8 +464,8 @@ class EmissionsPeakTest:
         print(
             f"Test data set: {self.test_data['year'].min()}-{self.test_data['year'].max()}"
         )
-        print(f"Test slope: {self.test_slope:.2f} Mt/year (R² = {self.test_r2:.3f})")
-        print(f"Recent historical trend: {self.recent_historical_trend:.2f} Mt/yr")
+        print(f"Test slope: {self.test_slope:.2f} {self.unit} (R² = {self.test_r2:.3f})")
+        print(f"Recent historical trend: {self.recent_historical_trend:.2f} {self.unit}")
 
         return self
 
@@ -473,20 +480,26 @@ class EmissionsPeakTest:
         return model.coef_[0], model.score(X, y)
 
     def run_complete_bootstrap_test(self, n_bootstrap: int = 10000, 
-                                   null_hypothesis: str = "zero_trend",
+                                   null_hypothesis: str | float = "zero_trend",
                                    bootstrap_method: str = "ar_bootstrap") -> Dict:
         """
         Run complete bootstrap test with all enhancements.
         
         Args:
-            null_hypothesis: "recent_trend" or "zero_trend"
+            null_hypothesis: Three options:
+                - "recent_trend" (testing if new data is consistent with recent trend)
+                - "zero_trend" (testing if new data is consistent with a zero trend)
+                - float: Give a specific trend to test if new data is consistent with
             bootstrap_method: "ar_bootstrap", "block_bootstrap", or "white_noise"
         """
         if self.noise_generator is None:
             self.create_noise_generator()
         
         print(f"Running complete bootstrap test...")
-        print(f"  Null hypothesis: {null_hypothesis}")
+        if isinstance(null_hypothesis, str):
+            print(f"  Null hypothesis: {null_hypothesis}")
+        else: 
+            print(f"  Null hypothesis: trend of {null_hypothesis} / yr")
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
         
@@ -526,9 +539,9 @@ class EmissionsPeakTest:
         print(f"  Significant at α=0.05: {self.bootstrap_results['significant_at_0.05']}")
         print(f"  Effect size: {effect_size:.2f} standard deviations")
         
-        return self.bootstrap_results
+        return
     
-    def _generate_bootstrap_slopes(self, n_bootstrap: int, null_hypothesis: str, 
+    def _generate_bootstrap_slopes(self, n_bootstrap: int, null_hypothesis: str | float, 
                                   bootstrap_method: str) -> np.ndarray:
         """Generate bootstrap slope distribution."""
         bootstrap_slopes = []
@@ -541,6 +554,8 @@ class EmissionsPeakTest:
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
             null_trend = self.recent_historical_trend
+        elif isinstance(null_hypothesis,float):
+            null_trend = null_hypothesis
         else:  # zero_trend
             null_trend = 0.0
         
@@ -644,7 +659,7 @@ class EmissionsPeakTest:
             "peak_conclusion": peak_conclusion,
             "confidence_in_peak": confidence,
             "p_value": f"{results['p_value_one_tail']:.4f}",
-            "slope": f"{results['test_slope']:.1f} Mt/year",
+            "slope": f"{results['test_slope']:.1f} {self.unit}",
         }
 
         if verbose:
@@ -735,8 +750,8 @@ class EmissionsPeakTest:
         )
 
         ax.set_xlabel("Year")
-        ax.set_ylabel("CO₂ Emissions (Mt)")
-        ax.set_title("Historical CO₂ Emissions and Test Data")
+        ax.set_ylabel(f"{self.variable}\n({self.unit})")
+        ax.set_title("Historical data and Test data")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -751,8 +766,8 @@ class EmissionsPeakTest:
         )
 
         ax.set_xlabel("Year")
-        ax.set_ylabel("CO₂ Emissions (Mt)")
-        ax.set_title("Historical Trend on CO₂ Emissions")
+        ax.set_ylabel(f"{self.variable}\n({self.unit})")
+        ax.set_title(f"Historical Trend on {self.variable}")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -767,8 +782,8 @@ class EmissionsPeakTest:
         )
 
         ax.set_xlabel("Year")
-        ax.set_ylabel("CO₂ Emissions (Mt)")
-        ax.set_title("Historical Residuals")
+        ax.set_ylabel(f"{self.variable}\n({self.unit})")
+        ax.set_title(f"Historical Residuals on {self.variable}")
         ax.legend()
         ax.axhline(y=0,color='k',lw=1)
         ax.grid(True, alpha=0.3)
@@ -795,7 +810,7 @@ class EmissionsPeakTest:
         #     )
         #     ax.plot(x_range, fitted_density, "r-", linewidth=2, label="Fitted normal")
 
-        ax.set_xlabel("Residuals (Mt)")
+        ax.set_xlabel(f"Residuals {self.unit}")
         ax.set_ylabel("Density")
         ax.set_title(f'Noise Distribution') #(σ = {self.noise_params["sigma"]:.0f} Mt)')
         ax.legend()
@@ -816,10 +831,10 @@ class EmissionsPeakTest:
             self.bootstrap_results["test_slope"],
             color="red",
             linewidth=2,
-            label=f'Observed slope\n{self.bootstrap_results["test_slope"]:.1f} Mt/yr',
+            label=f'Observed slope\n{self.bootstrap_results["test_slope"]:.1f} {self.unit}',
         )
 
-        ax.set_xlabel("Slope (Mt/year)")
+        ax.set_xlabel(f"Slope: {self.unit}")
         ax.set_ylabel("Density")
         ax.set_title("Bootstrap Distribution vs Observed Slope")
         ax.legend()
@@ -837,7 +852,7 @@ class EmissionsPeakTest:
         ________________________
         
         Test Data: {len(self.test_data)} years
-        Observed Slope: {results['test_slope']:.2f} Mt/year
+        Observed Slope: {results['test_slope']:.2f} {self.unit}
         R²: {results['test_r2']:.3f}
         
         Bootstrap Analysis:
@@ -849,7 +864,7 @@ class EmissionsPeakTest:
         • Method: {self.trend_info['method']}
         • Autocorrelation present: {self.autocorr_params['has_autocorr']}
         • Autocorrelation: {self.autocorr_params['phi']}
-        • Std Dev: {self.autocorr_params['sigma_residuals']:.1f} Mt
+        • Std Dev: {self.autocorr_params['sigma_residuals']:.1f} {self.unit}
         
         CONCLUSION:
         """
@@ -925,8 +940,8 @@ if __name__ == "__main__":
 
     # Method chaining example
     peak_test.load_historical_data(
-        "gcb_hist_co2.csv",
-        emissions_col="fossil_co2_emissions",
+        "fossil_intensity.csv",
+        # emissions_col="fossil_co2_emissions",
         year_range=range(1970, 2024),
     )
     
