@@ -294,7 +294,7 @@ class EmissionsPeakTest:
 
         elif method == "loess":
             # LOESS smoothing
-            frac = 0.3  # Smoothing parameter; we may want to make this adjustable
+            frac =  kwargs.get('fraction',0.3)  # Smoothing parameter
             smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
             residuals = emissions - smoothed
             residuals_list.append(pd.Series(index=years, data=residuals))
