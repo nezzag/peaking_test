@@ -9,6 +9,8 @@ dependencies:
 - seaborn
 - jupyterlab
 - pytest
+- pycountry
+- openpyxl
 - pip
 - pip:
   - pandas_indexing
