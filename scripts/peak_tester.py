@@ -39,6 +39,7 @@ Authors: Neil Grant and Claire Fyson
 import numpy as np
 import pandas as pd
 import pandas_indexing as pix
+from pandas_indexing import isin
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
@@ -69,6 +70,7 @@ class EmissionsPeakTest:
     random year-to-year fluctuations.
 
     Attributes:
+        region (str): ISO code for the region you want to analyse
         historical_data (pd.DataFrame): Historical emissions data
         test_data (pd.DataFrame): Recent emissions data showing potential decline
         noise_params (Dict): Parameters of the fitted noise distribution
@@ -77,13 +79,14 @@ class EmissionsPeakTest:
         residuals (np.ndarray): Residuals from trend fitting
     """
 
-    def __init__(self):
+    def __init__(self, region):
         """
         Initialize the emissions peak test.
 
         Args:
             random_state: Random seed for reproducibility
         """
+        self.region: str = region
         self.historical_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
         self.recent_historical_trend: Optional[float] = None
@@ -112,22 +115,26 @@ class EmissionsPeakTest:
         Returns:
             Self for method chaining
         """
+        if self.region is None:
+            raise ValueError("No region selected - provide ISO3 code for region of interest")
+
         if isinstance(data_source, str):
             # Load from file, which should be stored in the data folder
-            data_path = Path(__file__).resolve().parent / f"../data/{data_source}"
+            data_path = Path(__file__).resolve().parent / f"../data/processed/{data_source}"
 
             try:
-                data = pd.read_csv(data_path, index_col=[0,1,2])
+                data = pd.read_csv(data_path, index_col=[0,1,2,3])
             except Exception as e:
                 raise ValueError(f"Could not load data from {data_path}: {e}")
 
         elif isinstance(data_source, pd.DataFrame):
-            assert data_source.index.names == ['region','variable','unit']
+            assert data_source.index.names == ['region','region_name','variable','unit']
             data = data_source.copy()
 
         else:
             raise ValueError("data_source must be a file path or DataFrame")
 
+        data = data.loc[isin(region=self.region)]
         self.variable = data.pix.unique('variable')[0]
         self.unit = data.pix.unique('unit')[0]
         # Cast into long-form and rename
@@ -194,7 +201,6 @@ class EmissionsPeakTest:
 
         Args:
             method: 'all_data' or 'segments' for residual calculation
-            ## delete? ##segment_length: Length of segments if using 'segments' method
             noise_type: 'normal' or 't-dist' or 'empirical# for noise distribution type
             t_df: Optional fixed degrees of freedom for t-distribution
             ignore_years: Years to exclude
@@ -750,6 +756,7 @@ class EmissionsPeakTest:
         # 5. Summary statistics
         self._plot_summary_statistics(axes[5])
 
+        f.suptitle(f'Results:\n{self.variable}:{self.region}',fontweight='bold',x=0.4,y=0.95)
         plt.tight_layout()
 
         if save_path:
