@@ -594,10 +594,12 @@ class EmissionsPeakTest:
 
         years = self.test_data.year.values # Arbitrary years for test
         
-        # Baseline emissions level (CF use historical last value rather than mean)
+        # Baseline emissions level (CF use fisrt test value rather than mean)
         # baseline_emissions = np.mean(self.test_data["emissions"]) # delete if agreed not needed
-        baseline_emissions = self.historical_data["emissions"].iloc[-1] 
-        baseline_year = self.historical_data["year"].iloc[-1]
+        # baseline_emissions = self.historical_data["emissions"].iloc[-1] 
+        # baseline_year = self.historical_data["year"].iloc[-1]
+        baseline_emissions = self.test_data.emissions[0] # update 6th november
+        baseline_year = self.test_data.year[0] # update 6th november
         
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
