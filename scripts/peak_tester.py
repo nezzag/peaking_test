@@ -79,14 +79,14 @@ class EmissionsPeakTest:
         residuals (np.ndarray): Residuals from trend fitting
     """
 
-    def __init__(self, region):
+    def __init__(self):
         """
         Initialize the emissions peak test.
 
         Args:
             random_state: Random seed for reproducibility
         """
-        self.region: str = region
+        self.region: Optional[str] = None
         self.historical_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
         self.recent_historical_trend: Optional[float] = None
@@ -102,6 +102,7 @@ class EmissionsPeakTest:
     def load_historical_data(
         self,
         data_source: Union[str, pd.DataFrame],
+        region: str,
         year_range: range = range(1970, 2020),
     ) -> "EmissionsPeakTest":
         """
@@ -116,7 +117,10 @@ class EmissionsPeakTest:
             Self for method chaining
         """
         if self.region is None:
-            raise ValueError("No region selected - provide ISO3 code for region of interest")
+            try:
+                self.region = region
+            except Exception as e:
+                raise ValueError("No region selected - provide ISO3 code for region of interest")
 
         if isinstance(data_source, str):
             # Load from file, which should be stored in the data folder
@@ -602,8 +606,8 @@ class EmissionsPeakTest:
         
         # Baseline emissions level (CF use historical last value rather than mean)
         # baseline_emissions = np.mean(self.test_data["emissions"]) # delete if agreed not needed
-        baseline_emissions = self.historical_data["emissions"].iloc[-1] 
-        baseline_year = self.historical_data["year"].iloc[-1]
+        baseline_emissions = self.test_data.emissions[0] 
+        baseline_year = self.test_data.year[0]
         
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
