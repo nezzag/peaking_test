@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
 from sklearn.linear_model import LinearRegression
+from statsmodels.regression.linear_model import GLSAR # may not need
 from statsmodels.tsa.stattools import acf
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.filters.hp_filter import hpfilter
@@ -319,8 +320,44 @@ class EmissionsPeakTest:
                 "parameter_info": {'fraction':frac},
                 "n_points": len(smoothed),
             }
+            
+        elif method == "linear":
+            X = np.column_stack([np.ones(len(years)), years])
+            model = OLS(emissions, X).fit()
+            rho = 0.0
+            trend = model.fittedvalues
+            residuals = emissions - trend
+    
+            trend_info = {
+                "method": method,
+                "trend": trend,
+                'parameter_info': model.params,
+                'standard_errors': model.bse,
+            }
+            
+            residuals_list.append(pd.Series(index=years, data=residuals))
+
+        elif method == "linear_w_autocorrelation":
+            X = np.column_stack([np.ones(len(years)), years])
+            model = GLSAR(emissions, X, rho=1).iterative_fit(maxiter=10)
+            rho = model.rho
+        
+            trend = model.fittedvalues  # Note: fittedvalues (plural)
+            residuals = emissions - trend
+
+            trend_info = {
+                "method": method,
+                "trend": trend,
+                'parameter_info': model.params,
+                'standard_errors': model.bse,
+                'rho': rho,
+                'model': model
+            }
+            
+            residuals_list.append(pd.Series(index=years, data=residuals))
+            
         else:
-            raise ValueError("Method must be one of 'hp', 'hamilton', or 'loess'")
+            raise ValueError("Method must be one of 'hp', 'hamilton', 'linear' or 'loess'")
 
         residuals = pd.concat(residuals_list)
         return residuals, trend_info
