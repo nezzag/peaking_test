@@ -4,6 +4,8 @@ import pycountry
 # Converting ISO Alpha-3 to ISO international names
 def iso_to_name(iso):
     """Converts from 3-character ISO to country"""
+    if iso == 'WLD':
+        return 'World'
     country = pycountry.countries.get(alpha_3=iso)
     if country is None:
         return iso
