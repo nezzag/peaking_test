@@ -495,6 +495,8 @@ class LMDIPeakAnalyzer:
                 'energy_intensity_change': (I1 / I0) - 1,
                 'carbon_intensity_change': (C1 / C0) - 1,
                 'emissions_change': (E1 / E0) - 1,
+                'carbon_intensity': C1,
+                'energy_intensity': E1,
                 'is_estimated': is_estimated_current or is_estimated_previous  # Flag if either year is estimated
             })
         
@@ -1085,6 +1087,244 @@ class LMDIPeakAnalyzer:
         
         return fig
          
+    def plot_lmdi_alldrivers_with_emission_changes(self, figsize=(18, 16)):
+        """Plot raw LMDI effects - with decoupling forces separated out - with CO2 emission changes as grey bars (Fig 4)"""
+        entities = list(self.peak_signals.keys())
+        n_entities = len(entities)
+        
+        # Calculate grid dimensions
+        cols = 3
+        rows = (n_entities + cols - 1) // cols
+        
+        # fig, axes = plt.subplots(rows, cols, figsize=figsize)
+        # if rows == 1:
+        #     axes = [axes] if n_entities == 1 else axes
+        # else:
+        #     axes = axes.ravel()
+        fig = plt.figure(figsize=figsize)
+        
+        for i, entity in enumerate(entities):
+            # ax = axes[i]
+            # Create two subplots vertically stacked for each entity
+            ax_top = plt.subplot(rows * 2, cols, (i % cols) + 1 + (i // cols) * cols * 2)
+            ax_bottom = plt.subplot(rows * 2, cols, (i % cols) + 1 + cols + (i // cols) * cols * 2, sharex=ax_top)
+            
+            lmdi_data = self.peak_signals[entity]['lmdi_trends']
+            
+            # Calculate CO2 emission changes (year-over-year)
+            # The total_change in LMDI data is already the emission change
+            plot_data = lmdi_data.copy()
+            
+            # # Plot CO2 emission changes as grey bars
+            # if 'total_change' in plot_data.columns:
+            #     # Create bars for emission changes
+            #     bars = ax.bar(plot_data['year'], plot_data['total_change'], 
+            #                  color='lightgrey', alpha=0.6, width=0.8, 
+            #                  label='CO₂ Change (Actual)', zorder=1)
+
+            # Plot CO2 emission changes as grey bars
+            if 'total_change' in plot_data.columns:
+                # Create bars with colors based on positive/negative values
+                bar_colors = ['darkgrey' if val < 0 else 'lightgrey' 
+                              for val in plot_data['total_change']]
+                bars = ax_top.bar(plot_data['year'], plot_data['total_change'], 
+                             color=bar_colors, alpha=0.6, width=0.8, 
+                             label='CO₂ Change (Actual)', zorder=1)
+                
+                # Highlight estimated bars differently
+                if 'is_estimated' in plot_data.columns:
+                    estimated_mask = plot_data['is_estimated'] == True
+                    if estimated_mask.any():
+                        # Update color for estimated bars
+                        estimated_indices = plot_data.index[estimated_mask].tolist()
+                        for idx in estimated_indices:
+                            if idx < len(bars):
+                                bars[idx].set_color('darkgrey')
+                                bars[idx].set_alpha(0.7)
+                                bars[idx].set_edgecolor('black')
+                                bars[idx].set_linewidth(1)
+            
+            # plot carbon intensity
+            ax_top2 = ax_top.twinx()
+            ax_top2.plot(plot_data['year'], plot_data['carbon_intensity'],
+                        label = 'Carbon intensity', linewidth = 2, color = 'purple', zorder=5)
+
+            # Format the secondary axis
+            ax_top2.set_ylabel('Carbon Intensity\n(tCO₂/unit)', fontsize=9, color='purple')
+            ax_top2.tick_params(axis='y', labelcolor='purple')
+            
+            # Ensure the line is visible above bars
+            ax_top2.set_zorder(ax_top.get_zorder() + 1)
+            ax_top.patch.set_visible(False)  # Makes the bars visible under the line
+            
+            # Plot raw LMDI effects as lines (on top of bars)
+            # Activity Effect (raw)
+            ax_bottom.plot(plot_data['year'], plot_data['activity_effect'], 
+                   label='Activity Effect', linewidth=2.5, color='deeppink', 
+                   alpha=0.9, zorder=5)
+            
+            # Decoupling Forces (raw) 
+            ax_bottom.plot(plot_data['year'], plot_data['intensity_effect'], 
+                   label='Energy intensity effect', linewidth=1.5, color='orange', 
+                   alpha=0.9, zorder=5)
+            
+            ax_bottom.plot(plot_data['year'], plot_data['carbon_effect'], 
+                    label='Carbon intensity effect', linewidth=1.5, color='darkturquoise', 
+                    alpha=0.9, zorder=5)
+
+            ax_bottom.plot(plot_data['year'], -1*plot_data['decoupling_forces'], 
+                    label='Decoupling forces', linewidth=2.5, color='green', 
+                    alpha=0.7, zorder=5)
+            
+            # Highlight estimated line portions with markers
+            if 'is_estimated' in plot_data.columns:
+                estimated_data = plot_data[plot_data['is_estimated'] == True]
+                
+                if len(estimated_data) > 0:
+                    # Add markers for estimated LMDI effects
+                    ax_bottom.scatter(estimated_data['year'], estimated_data['activity_effect'], 
+                              color='lightpink', s=100, alpha=0.9, marker='o', 
+                              edgecolors='deeppink', linewidth=2, zorder=7,
+                              label='Activity (Est.)')
+                    ax_bottom.scatter(estimated_data['year'], estimated_data['intensity_effect'], 
+                              color='gold', s=100, alpha=0.9, marker='o',
+                              edgecolors='orange', linewidth=2, zorder=7,
+                              label='Energy intensity (Est.)')
+                    ax_bottom.scatter(estimated_data['year'], estimated_data['carbon_effect'], 
+                              color='paleturquoise', s=100, alpha=0.9, marker='o',
+                              edgecolors='darkturquoise', linewidth=2, zorder=7,
+                              label='Carbon intensity (Est.)')
+                    ax_bottom.scatter(estimated_data['year'], -1*estimated_data['decoupling_forces'], 
+                              color='lightgreen', s=100, alpha=0.9, marker='o',
+                              edgecolors='green', linewidth=2, zorder=7,
+                              label='Decoupling forces (Est.)')
+            
+            
+            # Zero line
+            ax_bottom.axhline(y=0, color='black', linestyle='--', alpha=0.5, zorder=2)
+            
+            # # Peak signal markers (where decoupling > activity)
+            # crossover_points = plot_data[plot_data['peak_signal_raw'] == True]
+            # if len(crossover_points) > 0:
+            #     # Distinguish actual vs estimated crossovers
+            #     if 'is_estimated' in crossover_points.columns:
+            #         actual_crossovers = crossover_points[crossover_points['is_estimated'] != True]
+            #         estimated_crossovers = crossover_points[crossover_points['is_estimated'] == True]
+                    
+            #         if len(actual_crossovers) > 0:
+            #             ax.scatter(actual_crossovers['year'], 
+            #                       actual_crossovers['decoupling_forces'],
+            #                       color='red', s=60, alpha=0.9, marker='o', 
+            #                       edgecolors='darkred', linewidth=1, zorder=8,
+            #                       label='Peak Signal')
+                    
+            #         if len(estimated_crossovers) > 0:
+            #             ax.scatter(estimated_crossovers['year'], 
+            #                       estimated_crossovers['decoupling_forces'],
+            #                       color='red', s=80, alpha=1.0, marker='*', 
+            #                       edgecolors='darkred', linewidth=1, zorder=9,
+            #                       label='Peak Signal (Est.)')
+            #     else:
+            #         ax.scatter(crossover_points['year'], 
+            #                   crossover_points['decoupling_forces'],
+            #                   color='red', s=60, alpha=0.9, marker='o', zorder=8)
+            
+            # Add a subtle legend entry for estimated bars if they exist
+            if 'is_estimated' in plot_data.columns and (plot_data['is_estimated'] == True).any():
+                # Add invisible bar for legend
+                ax_top.bar([], [], color='darkgrey', alpha=0.7, 
+                       edgecolor='black', linewidth=1, label='CO₂ Change (Est.)')
+            
+            # Formatting
+            ax_bottom.set_xlabel('Year')
+            ax_bottom.set_ylabel('Effect Magnitude (Mt CO₂ eq/year)')
+            # ax_bottom.legend(fontsize=7, loc='lower left')
+            ax_bottom.grid(True, alpha=0.3, zorder=0)
+            
+            # Title
+            ax_top.set_title(f'{entity} - LMDI Decomposition & Emission Changes')
+            
+            # # Status text box
+            status = self._determine_status(
+                self.peak_signals[entity]['latest_raw_signal'],
+                self.peak_signals[entity]['latest_smooth_signal'],
+                self.peak_signals[entity]['latest_raw_strength'],
+                self.peak_signals[entity]['latest_smooth_strength']
+            )
+            
+            # Check if this entity has 2024 estimates
+            has_2024_estimates = ('is_estimated' in plot_data.columns and 
+                                 (plot_data['is_estimated'] == True).any())
+            
+            status_text = f'Status: {status}'
+            if has_2024_estimates:
+                status_text += '\n(2024: GCB estimates)'
+            
+            # Add LMDI validation info
+            if 'residual' in plot_data.columns:
+                recent_residual = plot_data['residual'].abs().tail(3).mean()
+                if recent_residual > 1:  # Threshold for significant residual
+                    status_text += f'\nLMDI residual: {recent_residual:.0f}'
+            
+            # ax.text(0.02, 0.98, status_text, 
+            #        transform=ax.transAxes, fontsize=8,
+            #        verticalalignment='top', 
+            #        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            
+            # Extend x-axis slightly to show 2024 clearly
+            if len(plot_data) > 0:
+                x_min, x_max = ax_bottom.get_xlim()
+                ax_bottom.set_xlim(x_min, max(x_max, plot_data['year'].max() + 0.5))
+            
+            # Set y-axis to show full range of effects and changes
+            if 'total_change' in plot_data.columns:
+                all_values = pd.concat([
+                    plot_data['activity_effect'], 
+                    plot_data['intensity_effect'],
+                    plot_data['carbon_effect'],
+                    plot_data['total_change']
+                ])
+                y_range = all_values.max() - all_values.min()
+                y_margin = y_range * 0.1
+                ax_bottom.set_ylim(all_values.min() - y_margin, all_values.max() + y_margin)
+                ax_top.set_ylim(plot_data['total_change'].min(), plot_data['total_change'].max())
+        
+        
+            # Add shading when emissions decrease AND decoupling > activity
+            if 'total_change' in plot_data.columns:
+                # Create mask for conditions
+                mask = (plot_data['total_change'] < 0) & (plot_data['decoupling_forces'].abs() > plot_data['activity_effect'])
+                
+                # Get y-axis limits for shading
+                y_min, y_max = ax_bottom.get_ylim()
+                
+                # Shade each year where conditions are met
+                for idx, row in plot_data[mask].iterrows():
+                    year = row['year']
+                    # Shade from year-0.5 to year+0.5 to cover the full bar width
+                    ax_bottom.axvspan(year - 0.5, year + 0.5, 
+                                      color='lightgreen', alpha=0.2, zorder=0,
+                                      label='Successful decoupling' if idx == plot_data[mask].index[0] else "")
+    
+        # At the end of your plotting function, before plt.tight_layout()
+        handles, labels = ax_bottom.get_legend_handles_labels()
+        # Remove any duplicate labels
+        by_label = dict(zip(labels, handles))
+        # ax_bottom.legend(by_label.values(), by_label.keys(), fontsize=7, loc='lower left')
+        fig.legend(by_label.values(), by_label.keys(),
+          loc='center left',
+          bbox_to_anchor=(1.02, 0.5),
+          fontsize=8,
+          frameon=True)
+        # Add more vertical spacing between subplot pairs
+        plt.subplots_adjust(hspace=0.5, wspace=0.3, right = 0.85)  # Increase hspace for vertical spacing
+        # plt.tight_layout()
+        plt.show()
+        
+        return fig
+
+
+    
     def get_top_emitters_by_recent_change(self, n_countries=15):
         """Identify top countries by absolute change in emissions over last 2 years"""
         if not hasattr(self, 'merged_data') or self.merged_data.empty:

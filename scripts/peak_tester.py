@@ -127,7 +127,7 @@ class EmissionsPeakTest:
             data_path = Path(__file__).resolve().parent / f"../data/processed/{data_source}"
 
             try:
-                data = pd.read_csv(data_path, index_col=[0,1,2,3])
+                data = pd.read_csv(data_path, index_col=[0,1,2,3,4])
             except Exception as e:
                 raise ValueError(f"Could not load data from {data_path}: {e}")
 
