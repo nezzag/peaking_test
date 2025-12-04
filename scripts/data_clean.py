@@ -14,7 +14,7 @@ IX_ORDER = ['region','region_name','variable','unit']
 #–-------------------------------------------------------
 
 fossil_co2 = pd.read_excel(
-    'data/raw/National_Fossil_Carbon_Emissions_2024v1.0.xlsx',
+    'data/raw/National_Fossil_Carbon_Emissions_2025_v0.3.xlsx',
     sheet_name='Territorial Emissions',
     skiprows=11,
     index_col=0
