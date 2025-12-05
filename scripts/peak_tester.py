@@ -44,12 +44,12 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
 from sklearn.linear_model import LinearRegression
-from statsmodels.regression.linear_model import GLSAR # may not need
+from sklearn.metrics import r2_score, mean_squared_error
 from statsmodels.tsa.stattools import acf
-from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.filters.hp_filter import hpfilter
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.regression.linear_model import OLS
+from scipy.interpolate import UnivariateSpline, make_splrep
 from typing import List, Tuple, Dict, Optional, Callable, Union
 from statsmodels.tsa.arima.model import ARIMA
 import warnings
@@ -94,6 +94,7 @@ class EmissionsPeakTest:
         self.noise_generator: Optional[Callable] = None
         self.bootstrap_results: Optional[Dict] = None
         self.residuals: Optional[pd.Series] = None
+        self.trend: Optional[pd.Series] = None
         self.trend_info: Optional[Dict] = None
 
     # =================================
@@ -103,7 +104,7 @@ class EmissionsPeakTest:
     def load_historical_data(
         self,
         data_source: Union[str, pd.DataFrame],
-        region: str,
+        region: str = "WLD",
         year_range: range = range(1970, 2020),
     ) -> "EmissionsPeakTest":
         """
@@ -121,45 +122,40 @@ class EmissionsPeakTest:
             try:
                 self.region = region
             except Exception as e:
-                raise ValueError("No region selected - provide ISO3 code for region of interest")
+                raise ValueError(
+                    "No region selected - provide ISO3 code for region of interest"
+                )
 
         if isinstance(data_source, str):
             # Load from file, which should be stored in the data folder
-            data_path = Path(__file__).resolve().parent / f"../data/processed/{data_source}"
+            data_path = (
+                Path(__file__).resolve().parent / f"../data/processed/{data_source}"
+            )
 
             try:
-                data = pd.read_csv(data_path, index_col=[0,1,2,3,4])
+                data = pd.read_csv(data_path, index_col=[0, 1, 2, 3, 4])
             except Exception as e:
                 raise ValueError(f"Could not load data from {data_path}: {e}")
 
         elif isinstance(data_source, pd.DataFrame):
-            assert data_source.index.names == ['region','region_name','variable','unit']
+            assert data_source.index.names == [
+                "region",
+                "region_name",
+                "variable",
+                "unit",
+            ]
             data = data_source.copy()
 
         else:
             raise ValueError("data_source must be a file path or DataFrame")
 
         data = data.loc[isin(region=self.region)]
-        self.variable = data.pix.unique('variable')[0]
-        self.unit = data.pix.unique('unit')[0]
+        self.variable = data.pix.unique("variable")[0]
+        self.unit = data.pix.unique("unit")[0]
         # Cast into long-form and rename
         data.columns = data.columns.astype(int)
-        data = pd.Series(index=data.columns,data=data.values.squeeze()).reset_index()
-        data.columns = ['year','emissions']
-        
-        # # Validate columns
-        # if year_col not in data.columns or emissions_col not in data.columns:
-        #     raise ValueError(
-        #         f"Data must contain '{year_col}' and '{emissions_col}' columns"
-        #     )
-
-        # # Standardize column names
-        # data = (
-        #     data[[year_col, emissions_col]]
-        #     .rename(columns={year_col: "year", emissions_col: "emissions"})
-        #     .sort_values("year")
-        #     .reset_index(drop=True)
-        # )
+        data = pd.Series(index=data.columns, data=data.values.squeeze()).reset_index()
+        data.columns = ["year", "emissions"]
 
         # Filter to the selected years
         self.historical_data = data.loc[data["year"].isin(year_range)]
@@ -196,19 +192,19 @@ class EmissionsPeakTest:
         self,
         method: str = "loess",
         noise_type: str = "normal",
-        t_df: Optional[float] = None,  
+        t_df: Optional[float] = None,
         ignore_years: list = None,
         **kwargs,
-        # clip_distribution: tuple = None, #TODO: Clip noise distribution to e.g. 5-95 percentiles?
     ) -> "EmissionsPeakTest":
         """
         Characterize the noise distribution in historical emissions data.
 
         Args:
-            method: 'all_data' or 'segments' for residual calculation
-            noise_type: 'normal' or 't-dist' or 'empirical# for noise distribution type
+            method: str: Decide the method of TSA to use to extract results
+            noise_type: 'normal' or 't-dist' or 'empirical' for noise distribution type
             t_df: Optional fixed degrees of freedom for t-distribution
             ignore_years: Years to exclude
+            **kwargs: Additional arguments for specific methods
 
         Returns:
             Self for method chaining
@@ -216,80 +212,149 @@ class EmissionsPeakTest:
         if self.historical_data is None:
             raise ValueError("Must load historical data first")
 
-        self.residuals, self.trend_info = self._calculate_residuals(
+        self.residuals, self.trend, self.trend_info = self._calculate_residuals(
             method, ignore_years, **kwargs
         )
 
         print(f"using {noise_type} distribution to calculate noise")
-        self.autocorr_params = self._analyze_autocorrelation(noise_type = noise_type)
-    
+        self.autocorr_params = self._analyze_autocorrelation(noise_type=noise_type)
 
         print("Noise characterization complete:")
         print(f"  Method used: {method}")
-        # print(f"  Distribution: {distribution}")
-        # print(f"  Noise std: {self.noise_params['sigma']:.1f} Mt")
-        # print(f"  Residuals: {len(self.residuals)} points")
 
         return self
 
-    def _calculate_residuals(self, method: str, ignore_years: list = None, **kwargs) -> Tuple[pd.Series, Dict]:
-        residuals_list = []
+    def _calculate_residuals(
+        self, method: str, ignore_years: list = None, **kwargs
+    ) -> Tuple[pd.Series, Dict]:
+        """ Decomposes a timeseries into trend + residuals
+        
+        Args:
+            method: str: Decide the method of TSA to use to extract results
+            ignore_years: Years to exclude
+            **kwargs: Additional arguments for specific methods
+
+        Returns:
+            residuals: pd.Series: List of residuals for the timeseries
+            trend: Dict: Dictionary with key data on the trend
+
+        """
+        residuals = pd.Series()
+        trend = pd.Series()
         trend_info = {}
-    
+
         hist_data = self.historical_data.copy()
         if ignore_years:
-            hist_data = hist_data.loc[~hist_data.year.isin(ignore_years)]
+            hist_data.loc[hist_data.year.isin(ignore_years)] = np.nan
+            hist_data = hist_data.interpolate()
 
         years = hist_data["year"].values
         emissions = hist_data["emissions"].values
 
-        if method in ["hp", "hodrick_prescott"]:
-            # HP filter
-            cycle, trend = hpfilter(emissions, lamb=100)  #100 is typical for annual data
-            residuals = emissions - trend
-            residuals_list.append(pd.Series(index=years, data=residuals))
+        if method == "loess":
+            # LOESS smoothing
+            frac = kwargs.get("fraction", 0.3)  # Smoothing parameter -> default option 0.3
+            smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
+            residuals = emissions - smoothed
+            residuals = pd.Series(index=years, data=residuals)
+            trend = smoothed
             trend_info = {
-                'method': 'Hodrick-Prescott filter',
-                "trend": pd.Series(trend, index=years),
-                "n_points": len(emissions),
-                'parameters': {'lambda': 100}
+                "method": "LOESS",
+                "parameters": {"fraction": frac},
+            }
+
+        elif method == "linear":
+            X = np.column_stack([np.ones(len(years)), years])
+            model = OLS(emissions, X).fit()
+            rho = 0.0
+            trend = model.fittedvalues
+            residuals = pd.Series(index=years, data=emissions - trend)
+            trend_info = {
+                "method": method,
+                "parameters": model.params,
+                "standard_errors": model.bse,
+            }
+
+
+        elif method == "linear_w_autocorrelation":
+            
+            # Create lagged variable(s) for autoregressive component
+            hist_data[f'emissions_lag'] = hist_data['emissions'].shift(1)
+                
+            # Drop rows with NaN values (first 'lag' rows will have NaN)
+            hist_data = hist_data.dropna().reset_index(drop=True)
+            
+            # Prepare features (X) and target (y)
+            feature_cols = ['year'] + ['emissions_lag']
+            X = hist_data[feature_cols]
+            y = hist_data['emissions']
+            
+            # Fit the linear regression model
+            model = LinearRegression()
+            model.fit(X, y)
+            
+            # Make predictions
+            y_pred = model.predict(X)
+            
+            # Calculate metrics
+            r2 = r2_score(y, y_pred)
+            mse = mean_squared_error(y, y_pred)
+            rmse = np.sqrt(mse)
+            
+            trend = pd.Series(index=years[1:],data = y_pred)
+            residuals = pd.Series(index=years[1:], data= (y - trend.values).values)
+            # Add a zero value for residuals in the first year
+            # residuals.loc[years[0]] = 0
+            trend_info = {
+                "method": method,
+                "parameters": {
+                    "intercept":model.intercept_,
+                    "trend":model.coef_[0],
+                    "autocorrelation":model.coef_[1]},
+                "model": model,
+            }
+        
+        elif method in ["hp", "hodrick_prescott"]:
+            # HP filter
+            cycle, trend = hpfilter(
+                emissions, lamb=100
+            )  # 100 is typical for annual data
+            residuals = pd.Series(index=years, data=emissions - trend)
+            trend = pd.Series(trend, index=years)
+            trend_info = {
+                "method": "Hodrick-Prescott filter",
+                "parameters": {"lambda": 100},
             }
 
         elif method == "hamilton":
             """Fit Hamilton's regression-based method."""
-            
+
             # Horizon ahead at which we calculate y, can be specified, otherwise default 4
-            h = kwargs.get('h',4)
+            h = kwargs.get("h", 4)
             # Length of timeseries that we use to predict y -> this is fixed by Hamilton's method
             p = 4
             n = len(years)
             y = emissions.copy()
-            
+
             if n <= p:
                 return None
-            
+
             # Build regression matrix
             # Both X and Y are reduced in size by p + h
             # (you can't forecast before p+h: into the data, as you don't have sufficient data)
             X = np.ones((n - p - h, p))
-            Y = y[p+h:]
-            
+            Y = y[p + h :]
+
             for i in range(p):
                 lag = p - i
                 X[:, i] = y[p + h - lag : n - lag]
-            
+
             # Fit regression
             model = OLS(Y, X).fit()
 
-            
-            # Create full series
-            full_trend = np.full(n, np.nan)
-            full_cycle = np.full(n, np.nan)
-            
-            full_trend[p+h:] = model.fittedvalues
-            full_cycle[p+h:] = model.resid
-
-            residuals_list.append(pd.Series(index=years[p+h:], data=model.resid))
+            # Extract data
+            residuals = pd.Series(index=years[p+h:], data=model.resid)
+            trend = pd.Series(index=years[p+h:], data=model.fittedvalues)
 
             # Fill initial periods (Neil: I removed this as there is no real way to backfill residuals)
             # if max_lag > 0:
@@ -299,86 +364,53 @@ class EmissionsPeakTest:
             #         full_cycle[i] = y[i] - full_trend[i]
             
             trend_info = {
-                'method': 'Hamilton (2018)',
-                'trend': pd.Series(full_trend, index=years),
-                # 'cycle': pd.Series(full_cycle, index=self.historical_data.index),
-                'parameters': {'h': h, 'p': p},
-                'parameter_info': f'h={h} (forecast horizon), p={p} (lags)',
-                'r_squared': model.rsquared,
-                'model': model
+                "method": "Hamilton (2018)",
+                "parameters": f"h={h} (forecast horizon), p={p} (lags)",
+                "r_squared": model.rsquared,
+                "model": model,
             }
 
-        elif method == "loess":
-            # LOESS smoothing
-            frac =  kwargs.get('fraction',0.3)  # Smoothing parameter
-            smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
-            residuals = emissions - smoothed
-            residuals_list.append(pd.Series(index=years, data=residuals))
-            trend_info = {
-                "method": 'LOESS',
-                "trend": smoothed,
-                "parameter_info": {'fraction':frac},
-                "n_points": len(smoothed),
-            }
-            
-        elif method == "linear":
-            X = np.column_stack([np.ones(len(years)), years])
-            model = OLS(emissions, X).fit()
-            rho = 0.0
-            trend = model.fittedvalues
-            residuals = emissions - trend
-    
-            trend_info = {
-                "method": method,
-                "trend": trend,
-                'parameter_info': model.params,
-                'standard_errors': model.bse,
-            }
-            
-            residuals_list.append(pd.Series(index=years, data=residuals))
+        elif method == 'spline':
 
-        elif method == "linear_w_autocorrelation":
-            X = np.column_stack([np.ones(len(years)), years])
-            model = GLSAR(emissions, X, rho=1).iterative_fit(maxiter=10)
-            rho = model.rho
-        
-            trend = model.fittedvalues  # Note: fittedvalues (plural)
-            residuals = emissions - trend
+            # Nest decides the number of "knots" in the spline
+            # If not provided, we use len(emissions)/3 (so a knot every 3 years)
+            n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions)/3)))
 
+            spline_model = make_splrep(
+                x=years, y=emissions,
+                s=len(years),
+                nest=n_knots
+                )
+            
+            trend = pd.Series(index=years, data=spline_model(years))
+            residuals = pd.Series(index=years, data=(spline_model(years) - emissions))
             trend_info = {
-                "method": method,
-                "trend": trend,
-                'parameter_info': model.params,
-                'standard_errors': model.bse,
-                'rho': rho,
-                'model': model
+                "method":"spline"
             }
-            
-            residuals_list.append(pd.Series(index=years, data=residuals))
-            
+
         else:
-            raise ValueError("Method must be one of 'hp', 'hamilton', 'linear' or 'loess'")
+            raise ValueError(
+                "Method must be one of 'loess' // 'linear' // ' linear_w_autocorrelation' // 'hp' // 'hamilton' //  // 'spline'"
+            )
 
-        residuals = pd.concat(residuals_list)
-        return residuals, trend_info
+        return residuals, trend, trend_info
 
-    def _analyze_autocorrelation(self, noise_type: str, t_df: Optional[float] = None) -> Dict:
+    def _analyze_autocorrelation(
+        self, noise_type: str, t_df: Optional[float] = None
+    ) -> Dict:
         """
-        Analyze autocorrelation in temporally-ordered residuals.
+        Analyze autocorrelation in temporally-ordered residuals to check for any remaining structure.
         Parameters:
         noise_type: type of noise distribution ('normal', 't-dist', 'empirical')
-        t_df: Optional fixed degrees of freedom for t-distribution. 
+        t_df: Optional fixed degrees of freedom for t-distribution.
             If None, will be fitted from data when noise_type = 't-dist'
-
-        old ones?
-        - data_version: 'raw', 'excluded', 'interpolated' 
-        - use_segmentation_data: If True, use same data as segmentation
         """
 
         residuals = self.residuals.values
-    
+
         # Calculate lag-1 autocorrelation via the acf function
         # (this provides additional statistical outputs if desired, but not the residuals)
+        #TODO: Check if these three lines are really needed
         acf_values, _, pvalues = acf(residuals, nlags=5, qstat=True, fft=True)
         phi = acf_values[1] if len(acf_values) > 1 else 0
         p_autocorr = pvalues[1] if len(acf_values) > 1 else 1
@@ -387,77 +419,83 @@ class EmissionsPeakTest:
         if len(residuals) > 1:
             y = residuals[1:]
             X = residuals[:-1].reshape(-1, 1)
-            
-            ar_model = LinearRegression() #TODO: Currently has non-zero intercept, which is weird...
+
+            ar_model = (
+                LinearRegression()
+            )  # TODO: Currently has non-zero intercept, which is weird...
             ar_model.fit(X, y)
             phi_fitted = ar_model.coef_[0]
 
             # Check that manual fit gives similar to the ACF results
+            # TODO: This is commented out currently because it often doesn't work -> need to explore why
             # assert np.isclose(phi_fitted, phi, rtol=1e-2)
 
-            #Innovation residuals are the residuals left after accounting for autocorrelation
+            # Innovation residuals are the residuals left after accounting for autocorrelation
             innovation_residuals = y - ar_model.predict(X)
             sigma_innovation = np.std(innovation_residuals)
             mean_innovation = np.mean(innovation_residuals)
 
             # calculate t-distribution
-            if noise_type == 't-dist':
+            if noise_type == "t-dist":
                 if t_df is not None:
                     # use provided df value
                     df_fitted = t_df
                 else:
-                    df_fitted, loc, scale = stats.t.fit(innovation_residuals) # these should be innovation residuals (with AC removed)
+                    df_fitted, loc, scale = stats.t.fit(
+                        innovation_residuals
+                    )  # these should be innovation residuals (with AC removed)
                     print(f"Fitted t-distribution to innovations: df = {df_fitted:.1f}")
             else:
                 df_fitted = None
-            
+
         else:
             phi_fitted = 0
             sigma_innovation = np.std(self.residuals)
             mean_innovation = np.mean(self.residuals)
-        
-        #TODO: Add more checks on autocorrelation, and explore this in more detail
+
+        # TODO: Add more checks on autocorrelation, and explore this in more detail
         self.autocorr_params = {
-            'phi': phi_fitted,
-            'residuals': innovation_residuals,
-            'sigma_residuals': sigma_innovation,
-            'mean_residuals': mean_innovation,
-            'has_autocorr': abs(phi_fitted) > 0.1,
-            'is_stationary': abs(phi_fitted) < 1,
-            'likelihood_of_autocorr': 1 - p_autocorr,
-            'noise_type': noise_type,
-            't_df_fitted': df_fitted
+            "phi": phi_fitted,
+            "residuals": innovation_residuals,
+            "sigma_residuals": sigma_innovation,
+            "mean_residuals": mean_innovation,
+            "has_autocorr": abs(phi_fitted) > 0.1,
+            "is_stationary": abs(phi_fitted) < 1,
+            "likelihood_of_autocorr": 1 - p_autocorr,
+            "noise_type": noise_type,
+            "t_df_fitted": df_fitted,
         }
-        
+
         print(f"Autocorrelation analysis:")
         print(f"  Lag-1 autocorr: {phi_fitted:.3f}")
         print(f"  Residual σ (post-autocorrelation): {sigma_innovation:.1f}")
         print(f"  Has significant autocorr: {self.autocorr_params['has_autocorr']}")
-        print(f"  Likelihood of autocorr: {self.autocorr_params['likelihood_of_autocorr']}")
-        
+        print(
+            f"  Likelihood of autocorr: {self.autocorr_params['likelihood_of_autocorr']}"
+        )
+
         return self.autocorr_params
 
     # =================================
     # C) Create a noise generator that can randomly reproduce noise
     # =================================
 
-    def create_noise_generator(
-            self):
+    def create_noise_generator(self):
         """
         Create noise generator
 
         Args:
-            ignore_years [list]: List of specific years to ignore from the residuals 
+            ignore_years [list]: List of specific years to ignore from the residuals
             because they are too large a variation and could bias the results (e.g. the GFC or COVID-19)
 
             clip_distribution [tuple]: Clip the distribution of residuals to exclude
             outlying percentiles (e.g. <5 and >95) before calculating
-            
+
             [noise_type [str]: 'normal', 't', or 'empirical' # NOT USED?
                 - 'normal': Fit normal distribution
                 - 't-dist': Fit t-distribution
                 - 'empirical': randomly draw from innovations] delete
-                
+
 
         Returns:
             params: Dictionary with standardized parameter names
@@ -468,34 +506,38 @@ class EmissionsPeakTest:
             raise ValueError(
                 "Must call characterize_noise() first to calculate residuals"
             )
-    
+
         if self.autocorr_params is None:
             self._analyze_autocorrelation()
-  
-        #TODO: Currently only loads up params from autocorrelation analysis -> if there is limited autocorrelation
+
+        # TODO: Currently only loads up params from autocorrelation analysis -> if there is limited autocorrelation
         # should we load a non-autocorrelated statistical analysis? (TBD)
-        phi = self.autocorr_params['phi']
-        sigma = self.autocorr_params['sigma_residuals']
-        mean = self.autocorr_params['mean_residuals']
-        residuals_post_ar = self.autocorr_params['residuals']
-        noise_type = self.autocorr_params['noise_type']
-    
-        
-        if self.autocorr_params['has_autocorr'] and self.autocorr_params['is_stationary']:
+        phi = self.autocorr_params["phi"]
+        sigma = self.autocorr_params["sigma_residuals"]
+        mean = self.autocorr_params["mean_residuals"]
+        residuals_post_ar = self.autocorr_params["residuals"]
+        noise_type = self.autocorr_params["noise_type"]
+
+        if (
+            self.autocorr_params["has_autocorr"]
+            and self.autocorr_params["is_stationary"]
+        ):
             print(f"Using AR(1) noise generator with φ={phi:.3f}")
-            
-            def ar1_noise_generator(size: int, 
-                                    initial_value: float | None = 0
-                                   ) -> np.ndarray:
+
+            def ar1_noise_generator(
+                size: int, initial_value: float | None = 0
+            ) -> np.ndarray:
                 """Generate AR(1) autocorrelated noise."""
-                #TODO: Think about t-distribution here instead of normal, and allowing non-zero mean - CF has done this
-                if noise_type not in ['normal','t-dist','empirical']:
-                    print("enter method for adding noise ('normal', 't-dist' or 'empirical'")
+                # TODO: Think about t-distribution here instead of normal, and allowing non-zero mean - CF has done this
+                if noise_type not in ["normal", "t-dist", "empirical"]:
+                    print(
+                        "enter method for adding noise ('normal', 't-dist' or 'empirical'"
+                    )
                 if noise_type == "normal":
                     innovations = np.random.normal(0, sigma, size)
                 elif noise_type == "t-dist":
                     # fit t distribution to residuals
-                    df_fitted = self.autocorr_params['t_df_fitted']
+                    df_fitted = self.autocorr_params["t_df_fitted"]
                     innovations = np.random.standard_t(df_fitted, size) * sigma
                 elif noise_type == "empirical":
                     innovations = np.random.choice(residuals_post_ar, size)
@@ -505,28 +547,30 @@ class EmissionsPeakTest:
                     series[0] = np.random.normal(0, self.residuals.abs().mean())
                 else:
                     series[0] = initial_value
-                
+
                 for t in range(1, size):
-                    series[t] = phi * series[t-1] + innovations[t]
-                
+                    series[t] = phi * series[t - 1] + innovations[t]
+
                 return series
-            
+
             self.noise_generator = ar1_noise_generator
-        
+
         else:
             print(f"Using white noise generator with σ={sigma:.1f}")
-            
-            def white_noise_generator(size: int, initial_value: float = 0) -> np.ndarray:
+
+            def white_noise_generator(
+                size: int, initial_value: float = 0
+            ) -> np.ndarray:
                 """Generate white noise."""
                 return np.random.normal(0, sigma, size)
-            
+
             self.noise_generator = white_noise_generator
-        
+
         return self.noise_generator
 
-    
-    
-    def set_test_data(self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10) -> "EmissionsPeakTest":
+    def set_test_data(
+        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10
+    ) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
 
@@ -540,11 +584,10 @@ class EmissionsPeakTest:
         recent_data = self.historical_data.tail(recent_years_for_trend)
         X_recent = recent_data["year"].values.reshape(-1, 1)
         y_recent = recent_data["emissions"].values
-        
+
         model_recent = LinearRegression()
         model_recent.fit(X_recent, y_recent)
         self.recent_historical_trend = model_recent.coef_[0]
-        
 
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
@@ -555,8 +598,12 @@ class EmissionsPeakTest:
         print(
             f"Test data set: {self.test_data['year'].min()}-{self.test_data['year'].max()}"
         )
-        print(f"Test slope: {self.test_slope:.2f} {self.unit} (R² = {self.test_r2:.3f})")
-        print(f"Recent historical trend: {self.recent_historical_trend:.2f} {self.unit}")
+        print(
+            f"Test slope: {self.test_slope:.2f} {self.unit} (R² = {self.test_r2:.3f})"
+        )
+        print(
+            f"Recent historical trend: {self.recent_historical_trend:.2f} {self.unit}"
+        )
 
         return self
 
@@ -570,12 +617,15 @@ class EmissionsPeakTest:
 
         return model.coef_[0], model.score(X, y)
 
-    def run_complete_bootstrap_test(self, n_bootstrap: int = 10000, 
-                                   null_hypothesis: str | float = "zero_trend",
-                                   bootstrap_method: str = "ar_bootstrap") -> Dict:
+    def run_complete_bootstrap_test(
+        self,
+        n_bootstrap: int = 10000,
+        null_hypothesis: str | float = "zero_trend",
+        bootstrap_method: str = "ar_bootstrap",
+    ) -> Dict:
         """
         Run complete bootstrap test with all enhancements.
-        
+
         Args:
             null_hypothesis: Three options:
                 - "recent_trend" (testing if new data is consistent with recent trend)
@@ -585,97 +635,109 @@ class EmissionsPeakTest:
         """
         if self.noise_generator is None:
             self.create_noise_generator()
-        
+
         print(f"Running complete bootstrap test...")
         if isinstance(null_hypothesis, str):
             print(f"  Null hypothesis: {null_hypothesis}")
-        else: 
+        else:
             print(f"  Null hypothesis: trend of {null_hypothesis} / yr")
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
-        
+
         bootstrap_slopes = self._generate_bootstrap_slopes(
             n_bootstrap, null_hypothesis, bootstrap_method
         )
-        
+
         # Calculate p-values
-        p_value_one_tail = np.sum(bootstrap_slopes <= self.test_slope) / len(bootstrap_slopes)
-        
+        p_value_one_tail = np.sum(bootstrap_slopes <= self.test_slope) / len(
+            bootstrap_slopes
+        )
+
         # Effect size: how many standard deviations below the null distribution
         null_mean = np.mean(bootstrap_slopes)
         null_std = np.std(bootstrap_slopes)
         effect_size = (null_mean - self.test_slope) / null_std if null_std > 0 else 0
-        
+
         self.bootstrap_results = {
-            'test_slope': self.test_slope,
-            'test_r2': self.test_r2,
-            'recent_historical_trend': self.recent_historical_trend,
-            'bootstrap_slopes': bootstrap_slopes,
-            'p_value_one_tail': p_value_one_tail,
-            'significant_at_0.1': p_value_one_tail < 0.1,
-            'significant_at_0.05': p_value_one_tail < 0.05,
-            'significant_at_0.01': p_value_one_tail < 0.01,
-            'null_hypothesis': null_hypothesis,
-            'bootstrap_method': bootstrap_method,
-            'effect_size': effect_size,
-            'null_mean': null_mean,
-            'null_std': null_std,
-            'n_bootstrap': n_bootstrap,
-            'autocorr_phi': self.autocorr_params['phi'],
+            "test_slope": self.test_slope,
+            "test_r2": self.test_r2,
+            "recent_historical_trend": self.recent_historical_trend,
+            "bootstrap_slopes": bootstrap_slopes,
+            "p_value_one_tail": p_value_one_tail,
+            "significant_at_0.1": p_value_one_tail < 0.1,
+            "significant_at_0.05": p_value_one_tail < 0.05,
+            "significant_at_0.01": p_value_one_tail < 0.01,
+            "null_hypothesis": null_hypothesis,
+            "bootstrap_method": bootstrap_method,
+            "effect_size": effect_size,
+            "null_mean": null_mean,
+            "null_std": null_std,
+            "n_bootstrap": n_bootstrap,
+            "autocorr_phi": self.autocorr_params["phi"],
             # 'n_segments': len(self.optimal_segments['best']['segments'])
         }
-        
+
         print(f"Results:")
         print(f"  P-value: {p_value_one_tail:.4f}")
-        print(f"  Significant at α=0.05: {self.bootstrap_results['significant_at_0.05']}")
+        print(
+            f"  Significant at α=0.05: {self.bootstrap_results['significant_at_0.05']}"
+        )
         print(f"  Effect size: {effect_size:.2f} standard deviations")
-        
+
         return
-    
-    def _generate_bootstrap_slopes(self, n_bootstrap: int, 
-                                   null_hypothesis: str | float, 
-                                  bootstrap_method: str) -> np.ndarray:
+
+    def _generate_bootstrap_slopes(
+        self, n_bootstrap: int, null_hypothesis: str | float, bootstrap_method: str
+    ) -> np.ndarray:
         """Generate bootstrap slope distribution."""
         bootstrap_slopes = []
         n_test_points = len(self.test_data)
 
-        years = self.test_data.year.values # Arbitrary years for test
-        
+        years = self.test_data.year.values  # Arbitrary years for test
+
         # Baseline emissions level (CF use historical last value rather than mean)
         # baseline_emissions = np.mean(self.test_data["emissions"]) # delete if agreed not needed
-        baseline_emissions = self.test_data.emissions[0] 
+        baseline_emissions = self.test_data.emissions[0]
         baseline_year = self.test_data.year[0]
-        
+
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
             null_trend = self.recent_historical_trend
-        elif isinstance(null_hypothesis,float):
+        elif isinstance(null_hypothesis, float):
             null_trend = null_hypothesis
         else:  # zero_trend
             null_trend = 0.0
 
-        
         for i in range(n_bootstrap):
             # Generate null hypothesis emissions trajectory
-            trend_component = null_trend * (years - baseline_year) # replace years[0] with baseline_year
+            trend_component = null_trend * (
+                years - baseline_year
+            )  # replace years[0] with baseline_year
             base_emissions = baseline_emissions + trend_component
-            
+
             # Add autocorrelated noise
-            if bootstrap_method == "ar_bootstrap" and self.autocorr_params['has_autocorr']:
+            if (
+                bootstrap_method == "ar_bootstrap"
+                and self.autocorr_params["has_autocorr"]
+            ):
                 # Use AR(1) noise generator. This creates the noise for all n_test_points in one go
-                
-                noise = self.noise_generator(n_test_points, initial_value=None) # noise_type = self.autocorr_params['noise_type']
+
+                noise = self.noise_generator(
+                    n_test_points, initial_value=None
+                )  # noise_type = self.autocorr_params['noise_type']
             else:  # white_noise
-                noise = np.random.normal(0, self.autocorr_params['sigma_residuals'], n_test_points)
-            
+                noise = np.random.normal(
+                    0, self.autocorr_params["sigma_residuals"], n_test_points
+                )
+
             null_emissions = base_emissions + noise
-            
+
             # Calculate slope
             X = years.reshape(-1, 1)
             model = LinearRegression()
             model.fit(X, null_emissions)
             bootstrap_slopes.append(model.coef_[0])
-        
+
         return np.array(bootstrap_slopes)
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
@@ -768,9 +830,10 @@ class EmissionsPeakTest:
 
         # fig, axes = plt.subplots(2, 3, figsize=figsize)
 
-        f = plt.figure(layout=None, figsize=(15,15))
-        gs = f.add_gridspec(nrows=16, ncols=7, left=0.05, right=0.75,
-                            hspace=0.1, wspace=0.05)
+        f = plt.figure(layout=None, figsize=(15, 15))
+        gs = f.add_gridspec(
+            nrows=16, ncols=7, left=0.05, right=0.75, hspace=0.1, wspace=0.05
+        )
 
         a0 = f.add_subplot(gs[:5, :3])
         a1 = f.add_subplot(gs[:2, 4:])
@@ -779,7 +842,6 @@ class EmissionsPeakTest:
         a4 = f.add_subplot(gs[6:10, 4:])
         a5 = f.add_subplot(gs[11:, :])
         axes = [a0, a1, a2, a3, a4, a5]
-
 
         # 1. Historical data with test data overlay
         self._plot_historical_and_test_data(axes[0])
@@ -797,7 +859,9 @@ class EmissionsPeakTest:
         # 5. Summary statistics
         self._plot_summary_statistics(axes[5])
 
-        f.suptitle(f'Results:\n{self.variable}:{self.region}',fontweight='bold',x=0.4,y=0.95)
+        f.suptitle(
+            f"Results:\n{self.variable}:{self.region}", fontweight="bold", x=0.4, y=0.95
+        )
         plt.tight_layout()
 
         if save_path:
@@ -835,7 +899,7 @@ class EmissionsPeakTest:
         """Plot historical trend data"""
         ax.plot(
             self.historical_data["year"],
-            self.trend_info["trend"],
+            self.trend,
             "b-",
             alpha=0.7,
             label="Historical emissions",
@@ -847,24 +911,18 @@ class EmissionsPeakTest:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-
     def _plot_historical_noise(self, ax: plt.Axes) -> None:
         """Plot historical noise data"""
         self.residuals.plot(
-            ax=ax,
-            label="Historical emissions",
-            color="orange",
-            style="-"
+            ax=ax, label="Historical emissions", color="orange", style="-"
         )
 
         ax.set_xlabel("Year")
         ax.set_ylabel(f"{self.variable}\n({self.unit})")
         ax.set_title(f"Historical Residuals on {self.variable}")
         ax.legend()
-        ax.axhline(y=0,color='k',lw=1)
+        ax.axhline(y=0, color="k", lw=1)
         ax.grid(True, alpha=0.3)
-
-
 
     def _plot_noise_distribution(self, ax: plt.Axes) -> None:
         """Plot the fitted noise distribution."""
@@ -878,7 +936,7 @@ class EmissionsPeakTest:
         )
 
         # Overlay fitted distribution
-        #TODO: Does this make sense to do with an autocorrelated system?
+        # TODO: Does this make sense to do with an autocorrelated system?
         # if self.noise_params["type"] == "normal":
         #     x_range = np.linspace(self.residuals.min(), self.residuals.max(), 100)
         #     fitted_density = stats.norm.pdf(
@@ -888,7 +946,9 @@ class EmissionsPeakTest:
 
         ax.set_xlabel(f"Residuals {self.unit}")
         ax.set_ylabel("Density")
-        ax.set_title(f'Noise Distribution') #(σ = {self.noise_params["sigma"]:.0f} Mt)')
+        ax.set_title(
+            f"Noise Distribution"
+        )  # (σ = {self.noise_params["sigma"]:.0f} Mt)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -959,7 +1019,7 @@ class EmissionsPeakTest:
             fontfamily="monospace",
         )
 
-    def export_results(self, filepath: str, signif_level: float=0.1) -> None:
+    def export_results(self, filepath: str, signif_level: float = 0.1) -> None:
         """
         Export analysis results to CSV file.
 
@@ -992,7 +1052,7 @@ class EmissionsPeakTest:
                 self.bootstrap_results["test_slope"],
                 self.bootstrap_results["test_r2"],
                 self.bootstrap_results["p_value_one_tail"],
-                self.bootstrap_results[f'significant_at_{signif_level}'],
+                self.bootstrap_results[f"significant_at_{signif_level}"],
                 self.bootstrap_results["n_bootstrap"],
                 # self.noise_params["sigma"],
                 len(self.test_data),
@@ -1016,12 +1076,14 @@ if __name__ == "__main__":
 
     # Method chaining example
     peak_test.load_historical_data(
-        "fossil_intensity.csv",
+        "gcb_hist_co2.csv",
         # emissions_col="fossil_co2_emissions",
         year_range=range(1970, 2024),
     )
-    
-    peak_test.characterize_noise(method="loess", noise_type = "normal")
+
+    peak_test.characterize_noise(
+        method="spline", noise_type="normal"
+    )
     peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
@@ -1031,7 +1093,7 @@ if __name__ == "__main__":
             # (2028, 37400)
         ]
     )
-    peak_test.run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
+    peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
     # Get interpretation
     interpretation = peak_test.interpret_results(verbose=True)
@@ -1051,6 +1113,3 @@ if __name__ == "__main__":
     print("• interpret_results()")
     print("• plot_analysis()")
     print("• export_results()")
-
-
-
