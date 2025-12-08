@@ -4,13 +4,14 @@ Loads raw data from data/raw and processes it to produce data for analysis in da
 
 import pandas as pd
 import pandas_indexing as pix
+from pandas_indexing import isin
 from helper_functions import iso_to_name, name_to_iso
 
 MtC_TO_MtCO2 = 3.664
 IX_ORDER = ["region", "region_name", "variable", "unit"]
 
 # –-------------------------------------------------------
-# CO2 emissions -----------------------------------------
+# CO2 emissions
 # –-------------------------------------------------------
 
 fossil_co2 = (
@@ -32,7 +33,7 @@ fossil_co2 = fossil_co2.reorder_levels(IX_ORDER)
 fossil_co2.to_csv("data/processed/gcb_hist_co2.csv")
 
 # –-------------------------------------------------------
-# GDP -----------------------------------------
+# GDP
 # –-------------------------------------------------------
 
 gdp = pd.read_csv("data/raw/WorldBank_GDP.csv", skiprows=4, index_col=[0, 1, 2, 3])
@@ -50,11 +51,43 @@ gdp.to_csv("data/processed/wdi_gdp.csv")
 
 
 # –-------------------------------------------------------
-# Carbon Intensity --------------------------------------
+# Primary Energy
 # –-------------------------------------------------------
 
-ci = (fossil_co2 / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
+pe = pd.read_excel("data/raw/EI_primaryenergy.xlsx",skiprows=2,index_col=0,skipfooter=13,usecols=range(61)).dropna(how='all')
+pe.index.names = ['region_name']
+pe.rename(index=lambda s:s.replace('Total World','World'),inplace=True)
+
+pe = pe.pix.assign(
+    region=[name_to_iso(r) for r in pe.pix.project("region_name").index],
+    variable='Primary Energy',
+    unit = 'EJ / yr'
+)
+pe = pe.reorder_levels(IX_ORDER)
+pe.columns = pe.columns.astype(int)
+pe = pe.loc[isin(region = list(filter(lambda s:len(s)==3, pe.pix.project('region').index)))]
+pe.to_csv("data/processed/primary_energy.csv")
+
+
+# –-------------------------------------------------------
+# Intensities
+# –-------------------------------------------------------
+
+ci_gdp = (fossil_co2 / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
     how="all", axis=1
 ) * 1e9
-ci = ci.pix.assign(variable="Carbon Intensity", unit="kg CO2 / $")
-ci.to_csv("data/processed/carbon_intensity.csv")
+ci_gdp = ci_gdp.pix.assign(variable="Carbon Intensity", unit="kg CO2 / $")
+ci_gdp.to_csv("data/processed/carbon_intensity_gdp.csv")
+
+
+ei_gdp = (pe / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
+    how="all", axis=1
+) * 1e12
+ei_gdp = ei_gdp.pix.assign(variable="Energy Intensity", unit="MJ / $")
+ei_gdp.to_csv("data/processed/energy_intensity_gdp.csv")
+
+ci_energy = (fossil_co2 / pe.droplevel(["variable", "unit"])).dropna(how="all").dropna(
+    how="all", axis=1
+) 
+ci_energy = ci_energy.pix.assign(variable="Carbon Intensity", unit="g CO2 / MJ")
+ci_energy.to_csv("data/processed/carbon_intensity_energy.csv")

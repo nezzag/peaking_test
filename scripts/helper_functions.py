@@ -98,6 +98,7 @@ NAME_REPLACE = {
     "Taiwan Province of China": "TWN",
     "Tajikistan, Republic of": "TJK",
     "Tanzania": "TZA",
+    "Trinidad & Tobago": "TTO",
     "United Republic of Tanzania": "TZA",
     "Timor-Leste, Democratic Republic of": "TLS",
     "Türkiye, Republic of": "TUR",
