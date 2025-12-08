@@ -42,7 +42,7 @@ import pandas_indexing as pix
 from pandas_indexing import isin
 import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy import stats
+from scipy import stats, optimize
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score, mean_squared_error
 from statsmodels.tsa.stattools import acf
@@ -227,16 +227,17 @@ class EmissionsPeakTest:
     def _calculate_residuals(
         self, method: str, ignore_years: list = None, **kwargs
     ) -> Tuple[pd.Series, Dict]:
-        """ Decomposes a timeseries into trend + residuals
-        
+        """Decomposes a timeseries into trend + residuals
+
         Args:
             method: str: Decide the method of TSA to use to extract results
             ignore_years: Years to exclude
             **kwargs: Additional arguments for specific methods
 
         Returns:
-            residuals: pd.Series: List of residuals for the timeseries
-            trend: Dict: Dictionary with key data on the trend
+            residuals: pd.Series: Residuals for the timeseries
+            trend: pd.Series: Trend of the timeseries
+            trend_info: Dict: Dictionary with key data on the trend
 
         """
         residuals = pd.Series()
@@ -253,7 +254,9 @@ class EmissionsPeakTest:
 
         if method == "loess":
             # LOESS smoothing
-            frac = kwargs.get("fraction", 0.3)  # Smoothing parameter -> default option 0.3
+            frac = kwargs.get(
+                "fraction", 0.3
+            )  # Smoothing parameter -> default option 0.3
             smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
             residuals = emissions - smoothed
             residuals = pd.Series(index=years, data=residuals)
@@ -266,7 +269,6 @@ class EmissionsPeakTest:
         elif method == "linear":
             X = np.column_stack([np.ones(len(years)), years])
             model = OLS(emissions, X).fit()
-            rho = 0.0
             trend = model.fittedvalues
             residuals = pd.Series(index=years, data=emissions - trend)
             trend_info = {
@@ -275,45 +277,129 @@ class EmissionsPeakTest:
                 "standard_errors": model.bse,
             }
 
-
         elif method == "linear_w_autocorrelation":
-            
             # Create lagged variable(s) for autoregressive component
-            hist_data[f'emissions_lag'] = hist_data['emissions'].shift(1)
-                
+            hist_data["emissions_lag"] = hist_data["emissions"].shift(1)
+
             # Drop rows with NaN values (first 'lag' rows will have NaN)
             hist_data = hist_data.dropna().reset_index(drop=True)
-            
+
             # Prepare features (X) and target (y)
-            feature_cols = ['year'] + ['emissions_lag']
+            feature_cols = ["year"] + ["emissions_lag"]
             X = hist_data[feature_cols]
-            y = hist_data['emissions']
-            
+            y = hist_data["emissions"]
+
             # Fit the linear regression model
             model = LinearRegression()
             model.fit(X, y)
-            
+
             # Make predictions
             y_pred = model.predict(X)
-            
+
             # Calculate metrics
             r2 = r2_score(y, y_pred)
             mse = mean_squared_error(y, y_pred)
             rmse = np.sqrt(mse)
-            
-            trend = pd.Series(index=years[1:],data = y_pred)
-            residuals = pd.Series(index=years[1:], data= (y - trend.values).values)
+
+            trend = pd.Series(index=years[1:], data=y_pred)
+            residuals = pd.Series(index=years[1:], data=(y - trend.values).values)
             # Add a zero value for residuals in the first year
             # residuals.loc[years[0]] = 0
             trend_info = {
                 "method": method,
                 "parameters": {
-                    "intercept":model.intercept_,
-                    "trend":model.coef_[0],
-                    "autocorrelation":model.coef_[1]},
+                    "intercept": model.intercept_,
+                    "trend": model.coef_[0],
+                    "autocorrelation": model.coef_[1],
+                    "r2": r2,
+                    "rmse": rmse,
+                },
                 "model": model,
             }
-        
+
+        elif method == "broken_trend":
+
+            def segments_fit(X, Y, max_bps):
+                """Function that performs a broken trend analysis on a timeseries
+
+                Args:
+                    X: np.array: X-values of the time series
+                    Y: np.array: Y-values of the time series
+                    max_bps: int: Max number of break points in the time series
+
+                Returns:
+                    x_predict: np.array: X-values of the break points in the time series
+                    y_predict: np.array: Y-values of the break points in the time series
+
+                Credit: Code snippet copied from
+                    https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
+                """
+                xmin = X.min()
+                xmax = X.max()
+
+                n = len(X)
+
+                aic_ = float("inf")
+                bic_ = float("inf")
+                r_ = None
+
+                for count in range(1, max_bps + 1):
+
+                    seg = np.full(count - 1, (xmax - xmin) / count)
+
+                    px_init = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+                    py_init = np.array(
+                        [Y[np.abs(X - x) < (xmax - xmin) * 0.1].mean() for x in px_init]
+                    )
+
+                    def func(p):
+                        seg = p[: count - 1]
+                        py = p[count - 1 :]
+                        px = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+                        return px, py
+
+                    def err(p):  # This is RSS / n
+                        px, py = func(p)
+                        Y2 = np.interp(X, px, py)
+                        return np.mean((Y - Y2) ** 2)
+
+                    r = optimize.minimize(
+                        err, x0=np.r_[seg, py_init], method="Nelder-Mead"
+                    )
+
+                    # Compute AIC/ BIC.
+                    aic = n * np.log(err(r.x)) + 4 * count
+                    bic = n * np.log(err(r.x)) + 2 * count * np.log(n)
+
+                    # Use AIC / BIC to determine if we want to add another breakpoint and test again
+                    if (bic < bic_) & (aic < aic_):
+                        # If so, then repeat with an additional break point
+                        r_ = r
+                        aic_ = aic
+                        bic_ = bic
+                    else:  # Stop and return the last function
+                        count = count - 1
+                        break
+
+                return func(r_.x)  ## Return the last (n-1)
+
+            max_bps = int(
+                np.ceil(len(emissions) / 5)
+            )  # Shortest trendlength is 5 years
+            breakpoints, y_breakpoint = segments_fit(years, emissions, max_bps)
+
+            trend = pd.Series(index=breakpoints, data=y_breakpoint)
+            trend = (
+                trend.reindex(set(years) | set(trend.index)).sort_index().interpolate()
+            )
+            trend = trend.reindex(years)
+
+            residuals = pd.Series(index=years, data=emissions - trend.values)
+            trend_info = {
+                "method": "broken-trend analysis",
+                "number_of_breakpoints": len(breakpoints),
+            }
+
         elif method in ["hp", "hodrick_prescott"]:
             # HP filter
             cycle, trend = hpfilter(
@@ -327,7 +413,7 @@ class EmissionsPeakTest:
             }
 
         elif method == "hamilton":
-            """Fit Hamilton's regression-based method."""
+            """Fit Hamilton's regression-based method"""
 
             # Horizon ahead at which we calculate y, can be specified, otherwise default 4
             h = kwargs.get("h", 4)
@@ -353,8 +439,8 @@ class EmissionsPeakTest:
             model = OLS(Y, X).fit()
 
             # Extract data
-            residuals = pd.Series(index=years[p+h:], data=model.resid)
-            trend = pd.Series(index=years[p+h:], data=model.fittedvalues)
+            residuals = pd.Series(index=years[p + h :], data=model.resid)
+            trend = pd.Series(index=years[p + h :], data=model.fittedvalues)
 
             # Fill initial periods (Neil: I removed this as there is no real way to backfill residuals)
             # if max_lag > 0:
@@ -362,7 +448,7 @@ class EmissionsPeakTest:
             #     for i in range(max_lag):
             #         full_trend[i] = model.fittedvalues[0] - trend_slope * (max_lag - i)
             #         full_cycle[i] = y[i] - full_trend[i]
-            
+
             trend_info = {
                 "method": "Hamilton (2018)",
                 "parameters": f"h={h} (forecast horizon), p={p} (lags)",
@@ -370,47 +456,47 @@ class EmissionsPeakTest:
                 "model": model,
             }
 
-        elif method == 'spline':
+        elif method == "spline":
 
             # Nest decides the number of "knots" in the spline
             # If not provided, we use len(emissions)/3 (so a knot every 3 years)
-            n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions)/3)))
+            n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions) / 3)))
 
-            spline_model = make_splrep(
-                x=years, y=emissions,
-                s=len(years),
-                nest=n_knots
-                )
-            
+            spline_model = make_splrep(x=years, y=emissions, s=len(years), nest=n_knots)
+
             trend = pd.Series(index=years, data=spline_model(years))
             residuals = pd.Series(index=years, data=(spline_model(years) - emissions))
-            trend_info = {
-                "method":"spline"
-            }
+            trend_info = {"method": "spline"}
 
         else:
             raise ValueError(
-                "Method must be one of 'loess' // 'linear' // ' linear_w_autocorrelation' // 'hp' // 'hamilton' //  // 'spline'"
+                "Method must be one of 'loess' // 'linear' // ' linear_w_autocorrelation' // + "
+                "'broken_trend' // 'hp' // 'hamilton' //  // 'spline'"
             )
 
         return residuals, trend, trend_info
 
     def _analyze_autocorrelation(
-        self, noise_type: str, t_df: Optional[float] = None
+        self, noise_type: str = "normal", t_df: Optional[float] = None
     ) -> Dict:
         """
         Analyze autocorrelation in temporally-ordered residuals to check for any remaining structure.
-        Parameters:
-        noise_type: type of noise distribution ('normal', 't-dist', 'empirical')
-        t_df: Optional fixed degrees of freedom for t-distribution.
-            If None, will be fitted from data when noise_type = 't-dist'
+        
+        Arguments:
+            noise_type: type of noise distribution ('normal', 't-dist', 'empirical')
+            t_df: Optional fixed degrees of freedom for t-distribution.
+                If None, will be fitted from data when noise_type = 't-dist'
+
+        Returns:
+            Self for method chaining
+
         """
 
         residuals = self.residuals.values
 
         # Calculate lag-1 autocorrelation via the acf function
         # (this provides additional statistical outputs if desired, but not the residuals)
-        #TODO: Check if these three lines are really needed
+        # TODO: Check if these three lines are really needed
         acf_values, _, pvalues = acf(residuals, nlags=5, qstat=True, fft=True)
         phi = acf_values[1] if len(acf_values) > 1 else 0
         p_autocorr = pvalues[1] if len(acf_values) > 1 else 1
@@ -453,13 +539,12 @@ class EmissionsPeakTest:
             sigma_innovation = np.std(self.residuals)
             mean_innovation = np.mean(self.residuals)
 
-        # TODO: Add more checks on autocorrelation, and explore this in more detail
         self.autocorr_params = {
+            "has_autocorr": 1 - p_autocorr < 0.1,
             "phi": phi_fitted,
             "residuals": innovation_residuals,
             "sigma_residuals": sigma_innovation,
             "mean_residuals": mean_innovation,
-            "has_autocorr": abs(phi_fitted) > 0.1,
             "is_stationary": abs(phi_fitted) < 1,
             "likelihood_of_autocorr": 1 - p_autocorr,
             "noise_type": noise_type,
@@ -533,6 +618,7 @@ class EmissionsPeakTest:
                     print(
                         "enter method for adding noise ('normal', 't-dist' or 'empirical'"
                     )
+                    innovations = None
                 if noise_type == "normal":
                     innovations = np.random.normal(0, sigma, size)
                 elif noise_type == "t-dist":
@@ -541,6 +627,7 @@ class EmissionsPeakTest:
                     innovations = np.random.standard_t(df_fitted, size) * sigma
                 elif noise_type == "empirical":
                     innovations = np.random.choice(residuals_post_ar, size)
+
                 series = np.zeros(size)
                 if initial_value is None:
                     # Draw a random start value based on the historical residuals
@@ -1081,9 +1168,7 @@ if __name__ == "__main__":
         year_range=range(1970, 2024),
     )
 
-    peak_test.characterize_noise(
-        method="spline", noise_type="normal"
-    )
+    peak_test.characterize_noise(method="spline", noise_type="normal")
     peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
