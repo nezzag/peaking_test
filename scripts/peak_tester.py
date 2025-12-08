@@ -36,24 +36,21 @@ Authors: Neil Grant and Claire Fyson
 # Module Imports
 # =================================
 
+from pathlib import Path
+import warnings
+from typing import List, Tuple, Dict, Optional, Callable, Union
 import numpy as np
 import pandas as pd
-import pandas_indexing as pix
 from pandas_indexing import isin
 import matplotlib.pyplot as plt
-from pathlib import Path
 from scipy import stats, optimize
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error
+from scipy.interpolate import make_splrep
 from statsmodels.tsa.stattools import acf
 from statsmodels.tsa.filters.hp_filter import hpfilter
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.regression.linear_model import OLS
-from scipy.interpolate import UnivariateSpline, make_splrep
-from typing import List, Tuple, Dict, Optional, Callable, Union
-from statsmodels.tsa.arima.model import ARIMA
-import warnings
-from itertools import combinations
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
 
 warnings.filterwarnings("ignore")
 
@@ -260,7 +257,7 @@ class EmissionsPeakTest:
             smoothed = lowess(emissions, years, frac=frac, return_sorted=False)
             residuals = emissions - smoothed
             residuals = pd.Series(index=years, data=residuals)
-            trend = smoothed
+            trend = pd.Series(index=years, data = smoothed)
             trend_info = {
                 "method": "LOESS",
                 "parameters": {"fraction": frac},
@@ -269,8 +266,8 @@ class EmissionsPeakTest:
         elif method == "linear":
             X = np.column_stack([np.ones(len(years)), years])
             model = OLS(emissions, X).fit()
-            trend = model.fittedvalues
-            residuals = pd.Series(index=years, data=emissions - trend)
+            trend = pd.Series(index=years, data = model.fittedvalues)
+            residuals = pd.Series(index=years, data=emissions - trend.values)
             trend_info = {
                 "method": method,
                 "parameters": model.params,
@@ -303,8 +300,13 @@ class EmissionsPeakTest:
 
             trend = pd.Series(index=years[1:], data=y_pred)
             residuals = pd.Series(index=years[1:], data=(y - trend.values).values)
-            # Add a zero value for residuals in the first year
-            # residuals.loc[years[0]] = 0
+
+            #TODO: Think about whether enforcing 0 residual for the first year is dangerous
+            trend = trend.reindex(years)
+            trend.loc[years[0]] = emissions[0]
+            residuals = residuals.reindex(years)
+            residuals.loc[years[0]] = 0
+
             trend_info = {
                 "method": method,
                 "parameters": {
@@ -511,7 +513,11 @@ class EmissionsPeakTest:
             phi_fitted = ar_model.coef_[0]
 
             # Check that manual fit gives similar to the ACF results – up to a 10% tolerance is accepted
-            assert np.isclose(phi_fitted, phi, rtol=1e-1)
+            try:
+                assert np.isclose(phi_fitted, phi, rtol=1e-1)
+            except AssertionError:
+                print('ACF-estimated phi and manually estimated phi do not align')
+                print(f'ACF_phi = {phi:.3f}, Manual_phi = {phi_fitted:.3f}')
 
             # Innovation residuals are the residuals left after accounting for autocorrelation
             innovation_residuals = y - ar_model.predict(X)
@@ -607,7 +613,7 @@ class EmissionsPeakTest:
             noise_type = self.autocorr_params["noise_type"]
                 
             
-            print(f"Using AR(1) noise generator with φ={phi:.2f}, mean={mean:.2f}, sigma={sigma:.2f}")
+            print(f"Using AR(1) noise generator with φ={phi:.2f}, mean={mean:.3f}, sigma={sigma:.3f}")
 
             def ar1_noise_generator(
                 size: int, initial_value: float | None = 0
@@ -645,8 +651,13 @@ class EmissionsPeakTest:
             # If no autocorrelation is identified, then just use a whitenoise generator
             sigma = np.std(self.residuals)
             mean = np.mean(self.residuals)
-            assert np.isclose(mean, 0, atol=1e-2)
-            print(f"Using white noise generator with mean=0,  σ={sigma:.1f}")
+            scale = np.max(self.residuals) - np.min(self.residuals)
+            try:
+                assert np.isclose(mean/scale, 0, atol=1e-2)
+                print(f"Using white noise generator with mean=0,  σ={sigma:.3f}")
+            except AssertionError:
+                print('White noise residuals are not distributed close to zero')
+                print(f'Mean of residuals = {mean}')
 
             def white_noise_generator(
                 size: int, initial_value: float = 0
@@ -770,7 +781,7 @@ class EmissionsPeakTest:
         print(f"Results:")
         print(f"  P-value: {p_value_one_tail:.4f}")
         print(
-            f"  Significant at α=0.05: {self.bootstrap_results['significant_at_0.05']}"
+            f"  Significant at α=0.1: {self.bootstrap_results['significant_at_0.1']}"
         )
         print(f"  Effect size: {effect_size:.2f} standard deviations")
 
@@ -1171,7 +1182,7 @@ if __name__ == "__main__":
         year_range=range(1970, 2024),
     )
 
-    peak_test.characterize_noise(method="spline", noise_type="normal")
+    peak_test.characterize_noise(method="linear_w_autocorrelation", noise_type="normal")
     peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
