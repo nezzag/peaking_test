@@ -494,12 +494,10 @@ class EmissionsPeakTest:
 
         residuals = self.residuals.values
 
-        # Calculate lag-1 autocorrelation via the acf function
-        # (this provides additional statistical outputs if desired, but not the residuals)
-        # TODO: Check if these three lines are really needed
-        acf_values, _, pvalues = acf(residuals, nlags=5, qstat=True, fft=True)
-        phi = acf_values[1] if len(acf_values) > 1 else 0
-        p_autocorr = pvalues[1] if len(acf_values) > 1 else 1
+        # Calculate lag-1 autocorrelation via the acf function, and the probability of autocorrelation
+        acf_values, _, pvalues = acf(residuals, nlags=1, qstat=True, fft=True)
+        phi = acf_values[1] # Ignore AR(0), i.e. no lag applied at all (which will be 1)
+        p_autocorr = pvalues[0]
 
         # Simple AR(1) model fitting
         if len(residuals) > 1:
@@ -512,9 +510,8 @@ class EmissionsPeakTest:
             ar_model.fit(X, y)
             phi_fitted = ar_model.coef_[0]
 
-            # Check that manual fit gives similar to the ACF results
-            # TODO: This is commented out currently because it often doesn't work -> need to explore why
-            # assert np.isclose(phi_fitted, phi, rtol=1e-2)
+            # Check that manual fit gives similar to the ACF results – up to a 10% tolerance is accepted
+            assert np.isclose(phi_fitted, phi, rtol=1e-1)
 
             # Innovation residuals are the residuals left after accounting for autocorrelation
             innovation_residuals = y - ar_model.predict(X)
@@ -529,7 +526,7 @@ class EmissionsPeakTest:
                 else:
                     df_fitted, loc, scale = stats.t.fit(
                         innovation_residuals
-                    )  # these should be innovation residuals (with AC removed)
+                    )  # these are the innovation residuals (with AC removed)
                     print(f"Fitted t-distribution to innovations: df = {df_fitted:.1f}")
             else:
                 df_fitted = None
@@ -540,18 +537,18 @@ class EmissionsPeakTest:
             mean_innovation = np.mean(self.residuals)
 
         self.autocorr_params = {
-            "has_autocorr": 1 - p_autocorr < 0.1,
+            "has_autocorr": p_autocorr < 0.1,
             "phi": phi_fitted,
             "residuals": innovation_residuals,
             "sigma_residuals": sigma_innovation,
             "mean_residuals": mean_innovation,
-            "is_stationary": abs(phi_fitted) < 1,
+            "is_stationary": abs(phi_fitted) < 1, # Check that autocorrelation is not growing
             "likelihood_of_autocorr": 1 - p_autocorr,
             "noise_type": noise_type,
             "t_df_fitted": df_fitted,
         }
 
-        print(f"Autocorrelation analysis:")
+        print("Autocorrelation analysis:\n")
         print(f"  Lag-1 autocorr: {phi_fitted:.3f}")
         print(f"  Residual σ (post-autocorrelation): {sigma_innovation:.1f}")
         print(f"  Has significant autocorr: {self.autocorr_params['has_autocorr']}")
@@ -595,25 +592,27 @@ class EmissionsPeakTest:
         if self.autocorr_params is None:
             self._analyze_autocorrelation()
 
-        # TODO: Currently only loads up params from autocorrelation analysis -> if there is limited autocorrelation
-        # should we load a non-autocorrelated statistical analysis? (TBD)
-        phi = self.autocorr_params["phi"]
-        sigma = self.autocorr_params["sigma_residuals"]
-        mean = self.autocorr_params["mean_residuals"]
-        residuals_post_ar = self.autocorr_params["residuals"]
-        noise_type = self.autocorr_params["noise_type"]
+        # Decide if to use an autocorrelated noise generator or a white noise generator
+        # This decision depends on if autocorrelation is still observed in the noise structure
 
         if (
             self.autocorr_params["has_autocorr"]
             and self.autocorr_params["is_stationary"]
         ):
-            print(f"Using AR(1) noise generator with φ={phi:.3f}")
+                    
+            phi = self.autocorr_params["phi"]
+            residuals_post_ar = self.autocorr_params["residuals"]
+            sigma = self.autocorr_params["sigma_residuals"]
+            mean = self.autocorr_params["mean_residuals"]
+            noise_type = self.autocorr_params["noise_type"]
+                
+            
+            print(f"Using AR(1) noise generator with φ={phi:.2f}, mean={mean:.2f}, sigma={sigma:.2f}")
 
             def ar1_noise_generator(
                 size: int, initial_value: float | None = 0
             ) -> np.ndarray:
                 """Generate AR(1) autocorrelated noise."""
-                # TODO: Think about t-distribution here instead of normal, and allowing non-zero mean - CF has done this
                 if noise_type not in ["normal", "t-dist", "empirical"]:
                     print(
                         "enter method for adding noise ('normal', 't-dist' or 'empirical'"
@@ -643,7 +642,11 @@ class EmissionsPeakTest:
             self.noise_generator = ar1_noise_generator
 
         else:
-            print(f"Using white noise generator with σ={sigma:.1f}")
+            # If no autocorrelation is identified, then just use a whitenoise generator
+            sigma = np.std(self.residuals)
+            mean = np.mean(self.residuals)
+            assert np.isclose(mean, 0, atol=1e-2)
+            print(f"Using white noise generator with mean=0,  σ={sigma:.1f}")
 
             def white_noise_generator(
                 size: int, initial_value: float = 0
