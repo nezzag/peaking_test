@@ -6,8 +6,28 @@ import matplotlib.pyplot as plt
 from config import Config
 
 global_co2_peaker = EmissionsPeakTest()
+
+if Config.sensitivity_analyses['emissions']:
+    hist_data = "gcb_hist_co2.csv"
+    null_hypothesis = 'zero_trend'
+    print("Running sensitivity analysis on emissions data")
+    test_data = [
+        (2025, 37700),
+        (2026, 37580), 
+        (2027, 37460)]
+
+
+elif Config.sensitivity_analyses['carbon_intensity']:
+    hist_data = "carbon_intensity_gdp.csv"
+    null_hypothesis = '2pc_decline'
+    print("Running sensitivity analysis on carbon intensity data with null hypothesis of 2% per year decline")   
+    test_data = [
+        (2025, 0.399),
+        (2026, 0.391), 
+        (2027, 0.383)]
+
 global_co2_peaker.load_historical_data(
-    "gcb_hist_co2.csv", region="WLD", year_range=range(1970, 2025)
+    hist_data, region="WLD", year_range=range(1970, 2025)
 )
 
 # -------------------------------------------
@@ -20,6 +40,8 @@ if Config.sensitivity_analyses['method_test']:
     residuals = pd.DataFrame(columns=global_co2_peaker.historical_data.year)
     trend = pd.DataFrame(columns=global_co2_peaker.historical_data.year)
     autocorr = pd.DataFrame(columns = ['has_autocorrelation'])
+    peaking_likelihood = pd.DataFrame(columns=['likelihood_of_peaking'])
+    threshold_90_trend = pd.DataFrame(columns=['90th percentile negative trend threshold'])
 
     for method in [
         "loess",
@@ -35,6 +57,11 @@ if Config.sensitivity_analyses['method_test']:
             residuals.loc[method] = global_co2_peaker.residuals
             trend.loc[method] = global_co2_peaker.trend
             autocorr.loc[method] = global_co2_peaker.autocorr_params['has_autocorr']
+            global_co2_peaker.create_noise_generator()
+            global_co2_peaker.set_test_data(test_data).run_complete_bootstrap_test(bootstrap_method = 'white_noise_bootstrap', null_hypothesis=null_hypothesis)
+            # ]).run_complete_bootstrap_test(bootstrap_method = 'white_noise_bootstrap' if not global_co2_peaker.autocorr_params['has_autocorr'] else 'ar_bootstrap')
+            peaking_likelihood.loc[method] = 1-global_co2_peaker.bootstrap_results['p_value_one_tail']
+            threshold_90_trend.loc[method] = np.percentile(global_co2_peaker.bootstrap_results['bootstrap_slopes'], 10)
 
 
     print('-'*50 + '\n standard deviation in residuals: ')
@@ -43,6 +70,8 @@ if Config.sensitivity_analyses['method_test']:
     print(residuals.abs().mean(axis=1))
     print('-'*50 + '\n Presence of autocorrelation in residuals: ')
     print(autocorr)
+    print('-'*50 + '\n 90th percentile for negative trend: ')
+    print(threshold_90_trend)
 
 # -------------------------------------------
 # Test 2: How do different paramterisations provide 

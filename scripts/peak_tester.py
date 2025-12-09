@@ -187,7 +187,7 @@ class EmissionsPeakTest:
 
     def characterize_noise(
         self,
-        method: str = "loess",
+        method: str = "lowess",
         noise_type: str = "normal",
         t_df: Optional[float] = None,
         ignore_years: list = None,
@@ -249,8 +249,8 @@ class EmissionsPeakTest:
         years = hist_data["year"].values
         emissions = hist_data["emissions"].values
 
-        if method == "loess":
-            # LOESS smoothing
+        if method == "lowess":
+            # lowess smoothing
             frac = kwargs.get(
                 "fraction", 0.3
             )  # Smoothing parameter -> default option 0.3
@@ -259,7 +259,7 @@ class EmissionsPeakTest:
             residuals = pd.Series(index=years, data=residuals)
             trend = pd.Series(index=years, data = smoothed)
             trend_info = {
-                "method": "LOESS",
+                "method": "lowess",
                 "parameters": {"fraction": frac},
             }
 
@@ -300,12 +300,13 @@ class EmissionsPeakTest:
 
             trend = pd.Series(index=years[1:], data=y_pred)
             residuals = pd.Series(index=years[1:], data=(y - trend.values).values)
+            year_to_use = years[1:]
 
             #TODO: Think about whether enforcing 0 residual for the first year is dangerous
-            trend = trend.reindex(years)
-            trend.loc[years[0]] = emissions[0]
-            residuals = residuals.reindex(years)
-            residuals.loc[years[0]] = 0
+            # trend = trend.reindex(years)
+            # trend.loc[years[0]] = emissions[0]
+            # residuals = residuals.reindex(years).dropna()
+            # residuals.loc[years[0]] = 0
 
             trend_info = {
                 "method": method,
@@ -472,7 +473,7 @@ class EmissionsPeakTest:
 
         else:
             raise ValueError(
-                "Method must be one of 'loess' // 'linear' // ' linear_w_autocorrelation' // + "
+                "Method must be one of 'lowess' // 'linear' // ' linear_w_autocorrelation' // + "
                 "'broken_trend' // 'hp' // 'hamilton' //  // 'spline'"
             )
 
@@ -731,6 +732,8 @@ class EmissionsPeakTest:
             null_hypothesis: Three options:
                 - "recent_trend" (testing if new data is consistent with recent trend)
                 - "zero_trend" (testing if new data is consistent with a zero trend)
+                - "2pc_decline" (testing if new data is consistent with a 2% per year decline)
+                - "3pc_decline" (testing if new data is consistent with a 3% per year decline)
                 - float: Give a specific trend to test if new data is consistent with
             bootstrap_method: "ar_bootstrap", "block_bootstrap", or "white_noise"
         """
@@ -797,7 +800,6 @@ class EmissionsPeakTest:
         years = self.test_data.year.values  # Arbitrary years for test
 
         # Baseline emissions level (CF use historical last value rather than mean)
-        # baseline_emissions = np.mean(self.test_data["emissions"]) # delete if agreed not needed
         baseline_emissions = self.test_data.emissions[0]
         baseline_year = self.test_data.year[0]
 
@@ -806,6 +808,10 @@ class EmissionsPeakTest:
             null_trend = self.recent_historical_trend
         elif isinstance(null_hypothesis, float):
             null_trend = null_hypothesis
+        elif null_hypothesis == "2pc_decline":
+            null_trend = -0.02 * baseline_emissions
+        elif null_hypothesis == "3pc_decline":
+            null_trend = -0.03 * baseline_emissions
         else:  # zero_trend
             null_trend = 0.0
 
@@ -999,8 +1005,8 @@ class EmissionsPeakTest:
     def _plot_historical_trend(self, ax: plt.Axes) -> None:
         """Plot historical trend data"""
         ax.plot(
-            self.historical_data["year"],
-            self.trend,
+            self.trend.index,
+            self.trend.values,
             "b-",
             alpha=0.7,
             label="Historical emissions",
@@ -1027,14 +1033,24 @@ class EmissionsPeakTest:
 
     def _plot_noise_distribution(self, ax: plt.Axes) -> None:
         """Plot the fitted noise distribution."""
-        ax.hist(
-            self.residuals,
-            bins=30,
-            density=True,
-            alpha=0.7,
-            color="skyblue",
-            label="Historical residuals",
-        )
+        if self.autocorr_params["has_autocorr"] and self.autocorr_params["is_stationary"]:
+            ax.hist(
+                    self.autocorr_params['residuals'],
+                    bins=30,
+                    density=True,
+                    alpha=0.7,
+                    color="skyblue",
+                    label="Residuals after autocorrelation removal",
+                )    
+        else:
+            ax.hist(
+                self.residuals,
+                bins=30,
+                density=True,
+                alpha=0.7,
+                color="skyblue",
+                label="Historical residuals",
+            )
 
         # Overlay fitted distribution
         # TODO: Does this make sense to do with an autocorrelated system?
