@@ -463,13 +463,23 @@ class EmissionsPeakTest:
 
             # Nest decides the number of "knots" in the spline
             # If not provided, we use len(emissions)/3 (so a knot every 3 years)
+            # Claire: I think nest might not be the best, as it only specifies the max number?
             n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions) / 3)))
 
-            spline_model = make_splrep(x=years, y=emissions, s=len(years), nest=n_knots)
+            s = kwargs.get("s", len(years))
+    
+            # Use automatic knot selection via smoothing
+            spline_model = make_splrep(x=years, y=emissions, s=s, nest=n_knots)
 
             trend = pd.Series(index=years, data=spline_model(years))
             residuals = pd.Series(index=years, data=(spline_model(years) - emissions))
-            trend_info = {"method": "spline"}
+
+            # Get the actual knots that were used
+            knots = spline_model.get_knots() if hasattr(spline_model, 'get_knots') else None
+
+            trend_info = {"method": "spline",
+                          "number_of_knots": knots,
+                          "s": s}
 
         else:
             raise ValueError(
@@ -1033,27 +1043,32 @@ class EmissionsPeakTest:
 
     def _plot_noise_distribution(self, ax: plt.Axes) -> None:
         """Plot the fitted noise distribution."""
+            # Plot original residuals
+        ax.hist(
+            self.residuals,
+            bins=30,
+            density=True,
+            alpha=0.5,  # More transparent so both visible
+            color="skyblue",
+            label="Original residuals",
+            edgecolor='blue',
+            linewidth=0.5
+        )
+        
+        # Plot innovations (if autocorrelation was detected and removed)
         if self.autocorr_params["has_autocorr"] and self.autocorr_params["is_stationary"]:
             ax.hist(
-                    self.autocorr_params['residuals'],
-                    bins=30,
-                    density=True,
-                    alpha=0.7,
-                    color="skyblue",
-                    label="Residuals after autocorrelation removal",
-                )    
-        else:
-            ax.hist(
-                self.residuals,
+                self.autocorr_params['residuals'],
                 bins=30,
                 density=True,
-                alpha=0.7,
-                color="skyblue",
-                label="Historical residuals",
+                alpha=0.5,  # More transparent so both visible
+                color="green",
+                label="Innovations (after AR removal)",
+                edgecolor='darkgreen',
+                linewidth=0.5
             )
-
         # Overlay fitted distribution
-        # TODO: Does this make sense to do with an autocorrelated system?
+        # # TODO: Does this make sense to do with an autocorrelated system?
         # if self.noise_params["type"] == "normal":
         #     x_range = np.linspace(self.residuals.min(), self.residuals.max(), 100)
         #     fitted_density = stats.norm.pdf(
@@ -1117,7 +1132,7 @@ class EmissionsPeakTest:
         • Method: {self.trend_info['method']}
         • Autocorrelation present: {self.autocorr_params['has_autocorr']}
         • Autocorrelation: {self.autocorr_params['phi']}
-        • Std Dev: {self.autocorr_params['sigma_residuals']:.1f} {self.unit}
+        • Std Dev: {self.autocorr_params['sigma_residuals']:.3f} {self.unit}
         
         CONCLUSION:
         """
@@ -1198,7 +1213,7 @@ if __name__ == "__main__":
         year_range=range(1970, 2024),
     )
 
-    peak_test.characterize_noise(method="linear_w_autocorrelation", noise_type="normal")
+    peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
     peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
