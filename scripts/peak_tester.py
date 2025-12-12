@@ -475,7 +475,7 @@ class EmissionsPeakTest:
             residuals = pd.Series(index=years, data=(spline_model(years) - emissions))
 
             # Get the actual knots that were used
-            knots = spline_model.get_knots() if hasattr(spline_model, 'get_knots') else None
+            knots = len(spline_model.t)
 
             trend_info = {"method": "spline",
                           "number_of_knots": knots,
@@ -745,7 +745,7 @@ class EmissionsPeakTest:
                 - "2pc_decline" (testing if new data is consistent with a 2% per year decline)
                 - "3pc_decline" (testing if new data is consistent with a 3% per year decline)
                 - float: Give a specific trend to test if new data is consistent with
-            bootstrap_method: "ar_bootstrap", "block_bootstrap", or "white_noise"
+            bootstrap_method: "ar_bootstrap", "white_noise"
         """
         if self.noise_generator is None:
             self.create_noise_generator()

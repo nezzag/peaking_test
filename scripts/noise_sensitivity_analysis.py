@@ -3,13 +3,15 @@ import pandas as pd
 import numpy as np
 from helper_functions import HiddenPrints
 import matplotlib.pyplot as plt
+import seaborn as sns
 from config import Config
 from typing import Optional, Dict
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
-global_co2_peaker = EmissionsPeakTest()
+test_peaker = EmissionsPeakTest()
 
 if Config.sensitivity_analyses['emissions']:
+    title_str = 'emissions'
     hist_data = "gcb_hist_co2.csv"
     null_hypothesis = 'zero_trend'
     print("Running sensitivity analysis on emissions data")
@@ -20,6 +22,7 @@ if Config.sensitivity_analyses['emissions']:
 
 
 elif Config.sensitivity_analyses['carbon_intensity']:
+    title_str = "carbon_intensity"
     hist_data = "carbon_intensity_gdp.csv"
     null_hypothesis = '2pc_decline'
     print("Running sensitivity analysis on carbon intensity data with null hypothesis of 2% per year decline")   
@@ -28,7 +31,7 @@ elif Config.sensitivity_analyses['carbon_intensity']:
         (2026, 0.391), 
         (2027, 0.383)]
 
-global_co2_peaker.load_historical_data(
+test_peaker.load_historical_data(
     hist_data, region="WLD", year_range=range(1970, 2025)
 )
 
@@ -39,11 +42,13 @@ global_co2_peaker.load_historical_data(
 
 if Config.sensitivity_analyses['method_test']:
 
-    residuals = pd.DataFrame(columns=global_co2_peaker.historical_data.year)
-    trend = pd.DataFrame(columns=global_co2_peaker.historical_data.year)
+    residuals = pd.DataFrame(columns=test_peaker.historical_data.year)
+    trend = pd.DataFrame(columns=test_peaker.historical_data.year)
     autocorr = pd.DataFrame(columns = ['has_autocorrelation'])
     peaking_likelihood = pd.DataFrame(columns=['likelihood_of_peaking'])
     threshold_90_trend = pd.DataFrame(columns=['90th percentile negative trend threshold'])
+  
+    f, ax = plt.subplots()
 
     for method in [
         "lowess",
@@ -55,24 +60,31 @@ if Config.sensitivity_analyses['method_test']:
         "spline",
     ]:
         with HiddenPrints():
-            global_co2_peaker.characterize_noise(method=method, noise_type="normal")
-            residuals.loc[method] = global_co2_peaker.residuals
-            trend.loc[method] = global_co2_peaker.trend
-            autocorr.loc[method] = global_co2_peaker.autocorr_params['has_autocorr']
-            global_co2_peaker.create_noise_generator()
-            global_co2_peaker.set_test_data(test_data).run_complete_bootstrap_test(bootstrap_method = 'white_noise_bootstrap', null_hypothesis=null_hypothesis)
-            # ]).run_complete_bootstrap_test(bootstrap_method = 'white_noise_bootstrap' if not global_co2_peaker.autocorr_params['has_autocorr'] else 'ar_bootstrap')
-            peaking_likelihood.loc[method] = 1-global_co2_peaker.bootstrap_results['p_value_one_tail']
-            threshold_90_trend.loc[method] = np.percentile(global_co2_peaker.bootstrap_results['bootstrap_slopes'], 10)
+            test_peaker.characterize_noise(method=method, noise_type="normal")
+            residuals.loc[method] = test_peaker.residuals
+            trend.loc[method] = test_peaker.trend
+            autocorr.loc[method] = test_peaker.autocorr_params['has_autocorr']
+            
+            test_peaker.create_noise_generator()
+            test_peaker.set_test_data(test_data).run_complete_bootstrap_test(bootstrap_method = 'ar_bootstrap', null_hypothesis=null_hypothesis)
+            peaking_likelihood.loc[method] = 1-test_peaker.bootstrap_results['p_value_one_tail']
+            threshold_90_trend.loc[method] = np.percentile(test_peaker.bootstrap_results['bootstrap_slopes'], 10)
+            
+            sns.kdeplot(test_peaker.bootstrap_results["bootstrap_slopes"],ax=ax,label=method)
+    
+    ax.legend()
+    ax.set_title(f'Boostrapped slopes: {title_str}: different noise methods')
+    plt.savefig('./outputs/figures/bootstrap_slopes.png',dpi=300)
 
-
-    print('-'*50 + '\n standard deviation in residuals: ')
+    print('-'*50 + '\n standard deviation in residuals:\n' + '-'*50)
     print(residuals.std(axis=1))
-    print('-'*50 + '\n average absolute size of residuals: ')
+    print('-'*50 + '\n average absolute size of residuals:\n' + '-'*50)
     print(residuals.abs().mean(axis=1))
-    print('-'*50 + '\n Presence of autocorrelation in residuals: ')
+    print('-'*50 + '\n Presence of autocorrelation in residuals:\n' + '-'*50)
     print(autocorr)
-    print('-'*50 + '\n 90th percentile for negative trend: ')
+    print('-'*50 + '\n Likelihood of peaking:\n' + '-'*50)
+    print(peaking_likelihood)
+    print('-'*50 + '\n 90th percentile for negative trend:\n' + '-'*50)
     print(threshold_90_trend)
 
 # -------------------------------------------
@@ -88,11 +100,11 @@ if Config.sensitivity_analyses['lowess_fraction_test']:
     with HiddenPrints():
         for frac in np.linspace(0.05,0.45,8):
             (
-                global_co2_peaker
+                test_peaker
                 .characterize_noise(method='lowess',fraction=frac)
                 .create_noise_generator()
             )
-            (    global_co2_peaker
+            (    test_peaker
                 .set_test_data([
                     (2025, 37700),
                     (2026, 37580), 
@@ -101,8 +113,8 @@ if Config.sensitivity_analyses['lowess_fraction_test']:
             )
 
 
-            noise_params.append(global_co2_peaker.autocorr_params)
-            peaking_likelihood.append(global_co2_peaker.bootstrap_results['p_value_one_tail'])
+            noise_params.append(test_peaker.autocorr_params)
+            peaking_likelihood.append(test_peaker.bootstrap_results['p_value_one_tail'])
 
     f, ax = plt.subplots()
     ax.plot(np.linspace(0.05,0.45,8),[1-s for s in peaking_likelihood])
@@ -125,11 +137,11 @@ if Config.sensitivity_analyses['noise_distribution_test']:
     with HiddenPrints():
         for noise_type in ["normal", "t-dist", "empirical"]:
             (
-                global_co2_peaker
+                test_peaker
                 .characterize_noise(method='lowess',noise_type=noise_type)
                 .create_noise_generator()
             )
-            (    global_co2_peaker
+            (    test_peaker
                 .set_test_data([
                     (2025, 37700),
                     (2026, 37580), 
@@ -137,8 +149,8 @@ if Config.sensitivity_analyses['noise_distribution_test']:
                 ]).run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
             )
 
-            noise_params.append(global_co2_peaker.autocorr_params)
-            peaking_likelihood.loc[noise_type] = 1 - global_co2_peaker.bootstrap_results['p_value_one_tail']
+            noise_params.append(test_peaker.autocorr_params)
+            peaking_likelihood.loc[noise_type] = 1 - test_peaker.bootstrap_results['p_value_one_tail']
             
     print(peaking_likelihood)
 
@@ -156,12 +168,12 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         'hp': [{}], #[{'lamb': lamb} for lamb in [100, 1600, 6400]],
         'broken_trend': [{}],  # [{'n_segments': n} for n in [2, 3, 4]],
         'hamilton': [{}],
-        'spline': [{'s': s} for s in [5, 10, 25, int(np.ceil(len(global_co2_peaker.historical_data.values)))]],
+        'spline': [{'n_knots': s} for s in [8, 10, 15, 25, len(test_peaker.historical_data.values)]],
     }
     
     def get_effective_parameters(method: str, n: int, params: Dict, trend_info: Dict, years:  Optional[np.ndarray] = None) -> int:
         """
-        Determine effective number of parameters for a given method (k).
+        Determine effective number of degrees of freedom for a given method (k).
         
         Args:
             method: Name of the trend extraction method
@@ -171,7 +183,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
             years: Optional, array of time points
             
         Returns:
-            Effective number of parameters (k)
+            Effective number of degrees of freedom / parameters (k)
         """
         if method == 'linear':
             return 2  # slope + intercept
@@ -180,7 +192,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
             return 3  # slope + intercept + AR(1) coefficient
         
         elif method == 'lowess':
-            # Effective df ≈ n × frac
+            # Effective degrees of freedom ≈ n × frac
             frac = params.get('fraction', 0.3)
 
             def compute_lowess_hat_trace(years, frac):
@@ -242,14 +254,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
                     return int(n * 0.3)  # Heavy smoothing
                 else:
                     return int(n * 0.2)  # Very smooth, few parameters 
-            return knots + k_spline
-            # if trend_info and 'number_of_knots' in trend_info:
-            #     n_knots = (trend_info['number_of_knots'])
-            #     k_spline = 3  # Cubic spline default 
-            #     return n_knots + k_spline
-            # else:
-                # Default approximation
-                # return int(np.sqrt(n))
+            
         
         elif method == 'broken_trend':
             # Number of segments
@@ -297,6 +302,8 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         print("  • 'has_autocorr' should be False for valid residuals")
         print("="*80)
 
+        return
+
 
     results = []
     
@@ -304,7 +311,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         for params in param_configs:
             try:
                 # Calculate residuals using this method
-                residuals, trend, trend_info = global_co2_peaker._calculate_residuals(method_name, **params)
+                residuals, trend, trend_info = test_peaker._calculate_residuals(method_name, **params)
                 years_to_use = residuals.index.values
                 # Calculate goodness of fit metrics
                 n = len(residuals)
@@ -315,12 +322,13 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
                 k = get_effective_parameters(method_name, n, params, trend_info, years_to_use)
                 
                 # Calculate information criteria
+                # Neil: This AIC model works for a linear fit, need to look further into this
                 AIC = n * np.log(sigma_squared) + 2 * k
                 BIC = n * np.log(sigma_squared) + k * np.log(n)
                 
                 # Additional metrics
-                r_squared = 1 - (RSS / np.sum((global_co2_peaker.historical_data['emissions'].values[-n:] - 
-                                            global_co2_peaker.historical_data['emissions'].values[-n:].mean())**2))
+                r_squared = 1 - (RSS / np.sum((test_peaker.historical_data['emissions'].values[-n:] - 
+                                            test_peaker.historical_data['emissions'].values[-n:].mean())**2))
                 
                 # # Test for remaining autocorrelation
                 # acf_values = acf(residuals, nlags=1, fft=False)
@@ -359,7 +367,9 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
     results_df['delta_BIC'] = results_df['BIC'] - best_BIC
     
     # Sort by AIC
-    results_df = results_df.sort_values('AIC').reset_index(drop=True)
-    
+    results_df = results_df.reset_index(drop=True)
+    print('-'*50 + '\n: Ranking models via AIC\n' + '-'*50)
+    print(results_df.sort_values('AIC')[['method', 'parameters', 'AIC', 'BIC', 'R_squared', 'sigma', 'k_params']])
 
-    print(results_df[['method', 'parameters', 'AIC', 'BIC', 'R_squared', 'sigma', 'k_params']])
+    print('-'*50 + '\n: Ranking models via BIC\n' + '-'*50)
+    print(results_df.sort_values('BIC')[['method', 'parameters', 'AIC', 'BIC', 'R_squared', 'sigma', 'k_params']])
