@@ -16,9 +16,10 @@ if Config.sensitivity_analyses['emissions']:
     null_hypothesis = 'zero_trend'
     print("Running sensitivity analysis on emissions data")
     test_data = [
-        (2025, 37700),
-        (2026, 37580), 
-        (2027, 37460)]
+        (2025, 38600),
+        (2026, 38300), 
+        (2027, 38000),
+        (2028, 37700)]
 
 
 elif Config.sensitivity_analyses['carbon_intensity']:
@@ -34,6 +35,7 @@ elif Config.sensitivity_analyses['carbon_intensity']:
 test_peaker.load_historical_data(
     hist_data, region="WLD", year_range=range(1970, 2025)
 )
+test_peaker.set_test_data(test_data, include_test_years=True)
 
 # -------------------------------------------
 # Test 1: How do different methods provide 
@@ -42,8 +44,8 @@ test_peaker.load_historical_data(
 
 if Config.sensitivity_analyses['method_test']:
 
-    residuals = pd.DataFrame(columns=test_peaker.historical_data.year)
-    trend = pd.DataFrame(columns=test_peaker.historical_data.year)
+    residuals = pd.DataFrame(columns=test_peaker.emissions_data.year)
+    trend = pd.DataFrame(columns=test_peaker.emissions_data.year)
     autocorr = pd.DataFrame(columns = ['has_autocorrelation'])
     peaking_likelihood = pd.DataFrame(columns=['likelihood_of_peaking'])
     threshold_90_trend = pd.DataFrame(columns=['90th percentile negative trend threshold'])
@@ -51,13 +53,13 @@ if Config.sensitivity_analyses['method_test']:
     f, ax = plt.subplots()
 
     for method in [
-        "lowess",
         "linear",
         "linear_w_autocorrelation",
         "broken_trend",
         "hp",
         "hamilton",
         "spline",
+        "lowess",
     ]:
         with HiddenPrints():
             test_peaker.characterize_noise(method=method, noise_type="normal")
@@ -74,7 +76,31 @@ if Config.sensitivity_analyses['method_test']:
     
     ax.legend()
     ax.set_title(f'Boostrapped slopes: {title_str}: different noise methods')
-    plt.savefig('./outputs/figures/bootstrap_slopes.png',dpi=300)
+    # plt.savefig('./outputs/figures/bootstrap_slopes.png',dpi=300)
+    # plt.show()
+
+    f, ax = plt.subplots()
+    for method in [
+        "linear",
+        "linear_w_autocorrelation",
+        "broken_trend",
+        "hp",
+        "hamilton",
+        "spline",
+        "lowess",
+    ]:
+        ax.plot(
+            test_peaker.emissions_data.year,
+            trend.loc[method],
+            label=method
+        )
+    ax.plot(test_peaker.emissions_data.year, test_peaker.emissions_data.emissions, 'k--', label='hist&test_data' )
+    ax.set_xlim(2010, 2030)
+    ax.set_ylim(25000, 40000)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    # plt.savefig('./outputs/figures/method_trends.png',dpi=300)
+    plt.show()
 
     print('-'*50 + '\n standard deviation in residuals:\n' + '-'*50)
     print(residuals.std(axis=1))
@@ -168,7 +194,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         'hp': [{}], #[{'lamb': lamb} for lamb in [100, 1600, 6400]],
         'broken_trend': [{}],  # [{'n_segments': n} for n in [2, 3, 4]],
         'hamilton': [{}],
-        'spline': [{'n_knots': s} for s in [8, 10, 15, 25, len(test_peaker.historical_data.values)]],
+        'spline': [{'n_knots': s} for s in [8, 10, 15, 25, len(test_peaker.emissions_data.values)]],
     }
     
     def get_effective_parameters(method: str, n: int, params: Dict, trend_info: Dict, years:  Optional[np.ndarray] = None) -> int:
@@ -327,8 +353,8 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
                 BIC = n * np.log(sigma_squared) + k * np.log(n)
                 
                 # Additional metrics
-                r_squared = 1 - (RSS / np.sum((test_peaker.historical_data['emissions'].values[-n:] - 
-                                            test_peaker.historical_data['emissions'].values[-n:].mean())**2))
+                r_squared = 1 - (RSS / np.sum((test_peaker.emissions_data['emissions'].values[-n:] - 
+                                            test_peaker.emissions_data['emissions'].values[-n:].mean())**2))
                 
                 # # Test for remaining autocorrelation
                 # acf_values = acf(residuals, nlags=1, fft=False)

@@ -86,6 +86,7 @@ class EmissionsPeakTest:
         """
         self.region: Optional[str] = None
         self.historical_data: Optional[pd.DataFrame] = None
+        self.emissions_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
         self.recent_historical_trend: Optional[float] = None
         self.noise_generator: Optional[Callable] = None
@@ -164,7 +165,7 @@ class EmissionsPeakTest:
             f"Loaded historical data: {self.historical_data['year'].min()}-{self.historical_data['year'].max()}"
         )
         print(f"Data points: {len(self.historical_data)}")
-
+        
         return self
 
     def _validate_historical_data(self) -> None:
@@ -208,6 +209,11 @@ class EmissionsPeakTest:
         """
         if self.historical_data is None:
             raise ValueError("Must load historical data first")
+        
+        if self.emissions_data is None:
+            # use historical data to run analysis or emissions data (including test data) if available
+            self.emissions_data = self.historical_data.copy()
+            print("Using historical data (excl test data) to run analysis")
 
         self.residuals, self.trend, self.trend_info = self._calculate_residuals(
             method, ignore_years, **kwargs
@@ -241,7 +247,7 @@ class EmissionsPeakTest:
         trend = pd.Series()
         trend_info = {}
 
-        hist_data = self.historical_data.copy()
+        hist_data = self.emissions_data.copy()
         if ignore_years:
             hist_data.loc[hist_data.year.isin(ignore_years)] = np.nan
             hist_data = hist_data.interpolate()
@@ -681,7 +687,7 @@ class EmissionsPeakTest:
         return self.noise_generator
 
     def set_test_data(
-        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10
+        self, test_data: List[Tuple[int, float]], include_test_years: bool = True, recent_years_for_trend: int = 10
     ) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
@@ -703,6 +709,12 @@ class EmissionsPeakTest:
 
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
+
+        if include_test_years:
+            # add or replace values with test data
+            self.emissions_data = pd.concat([self.historical_data, self.test_data], ignore_index=True).drop_duplicates()
+        else:
+            self.emissions_data = self.historical_data
 
         # Calculate test trend
         self.test_slope, self.test_r2 = self._calculate_test_slope()
@@ -809,7 +821,7 @@ class EmissionsPeakTest:
 
         years = self.test_data.year.values  # Arbitrary years for test
 
-        # Baseline emissions level (CF use historical last value rather than mean)
+        # Baseline emissions level
         baseline_emissions = self.test_data.emissions[0]
         baseline_year = self.test_data.year[0]
 
@@ -1213,16 +1225,18 @@ if __name__ == "__main__":
         year_range=range(1970, 2024),
     )
 
-    peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
-    peak_test.create_noise_generator()
+    # peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
+    # peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
             (2025, 37700),
             (2026, 37400),
             (2027, 37100),
             # (2028, 37400)
-        ]
+        ], include_test_years=True
     )
+    peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
+    peak_test.create_noise_generator()
     peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
     # Get interpretation

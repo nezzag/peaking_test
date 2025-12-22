@@ -4,9 +4,9 @@ class Config:
         'emissions': True,
         'carbon_intensity': False,
         # Choice of tests
-        'method_test': False,
+        'method_test': True,
         'lowess_fraction_test': False,
         'noise_distribution_test': False,
-        'aic_bic_comparison': True,
+        'aic_bic_comparison': False,
     }
     
