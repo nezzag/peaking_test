@@ -68,9 +68,13 @@ class EmissionsPeakTest:
     random year-to-year fluctuations.
 
     Attributes:
+        TODO: Update this list with the latest set of attributes
         region (str): ISO code for the region you want to analyse
         historical_data (pd.DataFrame): Historical emissions data
         test_data (pd.DataFrame): Recent emissions data showing potential decline
+        emissions_data (pd.DataFrame): A composite of historical emissions data and potential test data
+        that we are analysing for decline. In the case that emissions have declined in the real world,
+        then emissions_data and historical_data would be equivalent
         noise_params (Dict): Parameters of the fitted noise distribution
         noise_generator (Callable): Function to generate noise samples
         bootstrap_results (Dict): Results from the bootstrap hypothesis test
@@ -80,9 +84,6 @@ class EmissionsPeakTest:
     def __init__(self):
         """
         Initialize the emissions peak test.
-
-        Args:
-            random_state: Random seed for reproducibility
         """
         self.region: Optional[str] = None
         self.historical_data: Optional[pd.DataFrame] = None
@@ -192,6 +193,7 @@ class EmissionsPeakTest:
         noise_type: str = "normal",
         t_df: Optional[float] = None,
         ignore_years: list = None,
+        include_test_data: bool = False,
         **kwargs,
     ) -> "EmissionsPeakTest":
         """
@@ -202,6 +204,7 @@ class EmissionsPeakTest:
             noise_type: 'normal' or 't-dist' or 'empirical' for noise distribution type
             t_df: Optional fixed degrees of freedom for t-distribution
             ignore_years: Years to exclude
+            include_test_data: Whether or not to include the test data in the system or not
             **kwargs: Additional arguments for specific methods
 
         Returns:
@@ -210,17 +213,12 @@ class EmissionsPeakTest:
         if self.historical_data is None:
             raise ValueError("Must load historical data first")
         
-        if self.emissions_data is None:
-            # use historical data to run analysis or emissions data (including test data) if available
-            self.emissions_data = self.historical_data.copy()
-            print("Using historical data (excl test data) to run analysis")
-
         self.residuals, self.trend, self.trend_info = self._calculate_residuals(
-            method, ignore_years, **kwargs
+            method, ignore_years, include_test_data, **kwargs
         )
 
         print(f"using {noise_type} distribution to calculate noise")
-        self.autocorr_params = self._analyze_autocorrelation(noise_type=noise_type)
+        self.autocorr_params = self._analyze_autocorrelation(noise_type=noise_type, t_df=t_df)
 
         print("Noise characterization complete:")
         print(f"  Method used: {method}")
@@ -228,7 +226,7 @@ class EmissionsPeakTest:
         return self
 
     def _calculate_residuals(
-        self, method: str, ignore_years: list = None, **kwargs
+        self, method: str, ignore_years: list = None, include_test_data: bool = False, **kwargs
     ) -> Tuple[pd.Series, Dict]:
         """Decomposes a timeseries into trend + residuals
 
@@ -247,7 +245,14 @@ class EmissionsPeakTest:
         trend = pd.Series()
         trend_info = {}
 
-        hist_data = self.emissions_data.copy()
+        if include_test_data:
+            # Take the blended data of historical + test data
+            hist_data = self.emissions_data.copy()
+        else:
+            # Just take the historical data alone
+            hist_data = self.historical_data.copy()
+
+
         if ignore_years:
             hist_data.loc[hist_data.year.isin(ignore_years)] = np.nan
             hist_data = hist_data.interpolate()
@@ -469,7 +474,6 @@ class EmissionsPeakTest:
 
             # Nest decides the number of "knots" in the spline
             # If not provided, we use len(emissions)/3 (so a knot every 3 years)
-            # Claire: I think nest might not be the best, as it only specifies the max number?
             n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions) / 3)))
 
             s = kwargs.get("s", len(years))
@@ -687,7 +691,7 @@ class EmissionsPeakTest:
         return self.noise_generator
 
     def set_test_data(
-        self, test_data: List[Tuple[int, float]], include_test_years: bool = True, recent_years_for_trend: int = 10
+        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10
     ) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
@@ -710,11 +714,7 @@ class EmissionsPeakTest:
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
 
-        if include_test_years:
-            # add or replace values with test data
-            self.emissions_data = pd.concat([self.historical_data, self.test_data], ignore_index=True).drop_duplicates()
-        else:
-            self.emissions_data = self.historical_data
+        self.emissions_data = pd.concat([self.historical_data, self.test_data], ignore_index=True).drop_duplicates()
 
         # Calculate test trend
         self.test_slope, self.test_r2 = self._calculate_test_slope()
@@ -1233,9 +1233,9 @@ if __name__ == "__main__":
             (2026, 37400),
             (2027, 37100),
             # (2028, 37400)
-        ], include_test_years=True
+        ]
     )
-    peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
+    peak_test.characterize_noise(method="spline", noise_type="normal", s=25, include_test_data=False)
     peak_test.create_noise_generator()
     peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
