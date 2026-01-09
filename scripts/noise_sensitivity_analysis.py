@@ -15,11 +15,6 @@ if Config.sensitivity_analyses['emissions']:
     hist_data = "gcb_hist_co2.csv"
     null_hypothesis = 'zero_trend'
     print("Running sensitivity analysis on emissions data")
-    test_data = [
-        (2025, 38600),
-        (2026, 38300), 
-        (2027, 38000),
-        (2028, 37700)]
 
 
 elif Config.sensitivity_analyses['carbon_intensity']:
@@ -27,15 +22,27 @@ elif Config.sensitivity_analyses['carbon_intensity']:
     hist_data = "carbon_intensity_gdp.csv"
     null_hypothesis = '2pc_decline'
     print("Running sensitivity analysis on carbon intensity data with null hypothesis of 2% per year decline")   
-    test_data = [
-        (2025, 0.399),
-        (2026, 0.391), 
-        (2027, 0.383)]
+
+else:
+    raise ValueError("Script is only set up to look at emissions or carbon_intensity currently")
 
 test_peaker.load_historical_data(
     hist_data, region="WLD", year_range=range(1970, 2025)
 )
-test_peaker.set_test_data(test_data, include_test_years=True)
+
+if Config.sensitivity_analyses['emissions']:
+    # Testing a 1% decline in emissions per year
+    test_peaker.set_test_data([
+        (2025, test_peaker.historical_data.iloc[-1,1]),
+        (2026, test_peaker.historical_data.iloc[-1,1]*(0.99 + np.random.rand()*0.0075)),
+        (2027, test_peaker.historical_data.iloc[-1,1]*(0.99**2 + np.random.rand()*0.0075))]) 
+
+else:
+    # Testing a 2% decline in carbon intensity per year
+    test_peaker.set_test_data([
+        (2025, test_peaker.historical_data.iloc[-1,1]),
+        (2026, test_peaker.historical_data.iloc[-1,1]*(0.98 + np.random.rand()*0.0075)),
+        (2027, test_peaker.historical_data.iloc[-1,1]*(0.96**2 + np.random.rand()*0.0075))])
 
 # -------------------------------------------
 # Test 1: How do different methods provide 
@@ -62,13 +69,13 @@ if Config.sensitivity_analyses['method_test']:
         "lowess",
     ]:
         with HiddenPrints():
-            test_peaker.characterize_noise(method=method, noise_type="normal")
+            test_peaker.characterize_noise(method=method, noise_type="normal", include_test_data=True, forced_breakpoints=[2025])
             residuals.loc[method] = test_peaker.residuals
             trend.loc[method] = test_peaker.trend
             autocorr.loc[method] = test_peaker.autocorr_params['has_autocorr']
             
             test_peaker.create_noise_generator()
-            test_peaker.set_test_data(test_data).run_complete_bootstrap_test(bootstrap_method = 'ar_bootstrap', null_hypothesis=null_hypothesis)
+            test_peaker.run_complete_bootstrap_test(bootstrap_method = 'ar_bootstrap', null_hypothesis=null_hypothesis)
             peaking_likelihood.loc[method] = 1-test_peaker.bootstrap_results['p_value_one_tail']
             threshold_90_trend.loc[method] = np.percentile(test_peaker.bootstrap_results['bootstrap_slopes'], 10)
             
@@ -76,8 +83,9 @@ if Config.sensitivity_analyses['method_test']:
     
     ax.legend()
     ax.set_title(f'Boostrapped slopes: {title_str}: different noise methods')
-    # plt.savefig('./outputs/figures/bootstrap_slopes.png',dpi=300)
-    # plt.show()
+    plt.savefig('./outputs/figures/bootstrap_slopes.png',dpi=300)
+
+    peaking_likelihood.to_csv(f'./outputs/data/peaking_likelihood_{title_str}.csv')
 
     f, ax = plt.subplots()
     for method in [
@@ -99,8 +107,7 @@ if Config.sensitivity_analyses['method_test']:
     ax.set_ylim(25000, 40000)
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    # plt.savefig('./outputs/figures/method_trends.png',dpi=300)
-    plt.show()
+    plt.savefig('./outputs/figures/method_trends.png',dpi=300)
 
     print('-'*50 + '\n standard deviation in residuals:\n' + '-'*50)
     print(residuals.std(axis=1))
@@ -194,7 +201,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         'hp': [{}], #[{'lamb': lamb} for lamb in [100, 1600, 6400]],
         'broken_trend': [{}],  # [{'n_segments': n} for n in [2, 3, 4]],
         'hamilton': [{}],
-        'spline': [{'n_knots': s} for s in [8, 10, 15, 25, len(test_peaker.emissions_data.values)]],
+        'spline': [{'n_knots': s} for s in [8, 10, 15, int(np.ceil(len(test_peaker.historical_data.values)/3))]],
     }
     
     def get_effective_parameters(method: str, n: int, params: Dict, trend_info: Dict, years:  Optional[np.ndarray] = None) -> int:
