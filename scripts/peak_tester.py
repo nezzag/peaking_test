@@ -338,13 +338,17 @@ class EmissionsPeakTest:
 
         elif method == "broken_trend":
 
-            def segments_fit(X, Y, max_bps):
+            # Get forced breakpoints if specified
+            forced_bps = kwargs.get("forced_breakpoints", None)
+
+            def segments_fit(X, Y, max_bps, forced_breakpoints=None):
                 """Function that performs a broken trend analysis on a timeseries
 
                 Args:
                     X: np.array: X-values of the time series
                     Y: np.array: Y-values of the time series
                     max_bps: int: Max number of break points in the time series
+                    forced_breakpoints: list: Years where breakpoints must occur
 
                 Returns:
                     x_predict: np.array: X-values of the break points in the time series
@@ -361,6 +365,26 @@ class EmissionsPeakTest:
                 aic_ = float("inf")
                 bic_ = float("inf")
                 r_ = None
+
+                # Handle forced breakpoints
+                if forced_breakpoints is not None and len(forced_breakpoints) > 0:
+                    # Fit piecewise linear segments with fixed breakpoints
+                    forced_bps = np.array(sorted(forced_breakpoints))
+                    # Add endpoints
+                    all_bps = np.concatenate([[xmin], forced_bps, [xmax]])
+
+                    # For each segment, fit a line
+                    y_values = [Y[X <= all_bps[0]].mean() if len(Y[X <= all_bps[0]]) > 0 else Y[0]]
+
+                    for i in range(len(all_bps) - 1):
+                        mask = (X > all_bps[i]) & (X <= all_bps[i+1])
+                        if np.sum(mask) > 0:
+                            # Calculate the y-value at this breakpoint by averaging nearby points
+                            y_at_bp = Y[mask].mean()
+                            y_values.append(y_at_bp)
+
+                    # Return fixed breakpoints
+                    return all_bps, np.array(y_values)
 
                 for count in range(1, max_bps + 1):
 
@@ -405,7 +429,8 @@ class EmissionsPeakTest:
             max_bps = int(
                 np.ceil(len(emissions) / 5)
             )  # Shortest trendlength is 5 years
-            breakpoints, y_breakpoint = segments_fit(years, emissions, max_bps)
+            print(f"Max breakpoints: {max_bps}")
+            breakpoints, y_breakpoint = segments_fit(years, emissions, max_bps, forced_breakpoints=forced_bps)
 
             trend = pd.Series(index=breakpoints, data=y_breakpoint)
             trend = (
