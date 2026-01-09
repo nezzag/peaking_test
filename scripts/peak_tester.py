@@ -353,9 +353,6 @@ class EmissionsPeakTest:
                 Returns:
                     x_predict: np.array: X-values of the break points in the time series
                     y_predict: np.array: Y-values of the break points in the time series
-
-                Credit: Code snippet copied from
-                    https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
                 """
                 xmin = X.min()
                 xmax = X.max()
@@ -366,25 +363,11 @@ class EmissionsPeakTest:
                 bic_ = float("inf")
                 r_ = None
 
-                # Handle forced breakpoints
+                # Store forced breakpoints for later merging
+                forced_bps_to_add = None
                 if forced_breakpoints is not None and len(forced_breakpoints) > 0:
-                    # Fit piecewise linear segments with fixed breakpoints
-                    forced_bps = np.array(sorted(forced_breakpoints))
-                    # Add endpoints
-                    all_bps = np.concatenate([[xmin], forced_bps, [xmax]])
-
-                    # For each segment, fit a line
-                    y_values = [Y[X <= all_bps[0]].mean() if len(Y[X <= all_bps[0]]) > 0 else Y[0]]
-
-                    for i in range(len(all_bps) - 1):
-                        mask = (X > all_bps[i]) & (X <= all_bps[i+1])
-                        if np.sum(mask) > 0:
-                            # Calculate the y-value at this breakpoint by averaging nearby points
-                            y_at_bp = Y[mask].mean()
-                            y_values.append(y_at_bp)
-
-                    # Return fixed breakpoints
-                    return all_bps, np.array(y_values)
+                    # Convert to integers to ensure they're whole years
+                    forced_bps_to_add = np.array(sorted(forced_breakpoints), dtype=int)
 
                 for count in range(1, max_bps + 1):
 
@@ -424,7 +407,61 @@ class EmissionsPeakTest:
                         count = count - 1
                         break
 
-                return func(r_.x)  ## Return the last (n-1)
+                # Get the automatically found breakpoints
+                px_auto, py_auto = func(r_.x)
+
+                # If we have forced breakpoints, merge them with the automatic ones
+                if forced_bps_to_add is not None:
+                    # Combine all breakpoints (auto + forced)
+                    all_bps = np.unique(np.concatenate([px_auto, forced_bps_to_add]))
+
+                    # Now fit linear regressions in each segment defined by all breakpoints
+                    y_values = []
+
+                    for i in range(len(all_bps) - 1):
+                        # Get data for this segment
+                        if i == 0:
+                            mask = (X >= all_bps[i]) & (X <= all_bps[i+1])
+                        else:
+                            mask = (X > all_bps[i]) & (X <= all_bps[i+1])
+
+                        X_seg = X[mask]
+                        Y_seg = Y[mask]
+
+                        if len(X_seg) >= 2:
+                            # Fit linear regression for this segment
+                            model = LinearRegression()
+                            model.fit(X_seg.reshape(-1, 1), Y_seg)
+
+                            # Predict y-values at the breakpoints
+                            y_start = model.predict([[all_bps[i]]])[0]
+                            y_end = model.predict([[all_bps[i+1]]])[0]
+
+                            # Add start point (unless it's not the first segment)
+                            if i == 0:
+                                y_values.append(y_start)
+                            # Always add end point
+                            y_values.append(y_end)
+                        elif len(X_seg) == 1:
+                            # Only one point in segment - use its value
+                            if i == 0:
+                                y_values.append(Y_seg[0])
+                            y_values.append(Y_seg[0])
+                        else:
+                            # No points in segment - interpolate linearly
+                            if i == 0 and len(y_values) == 0:
+                                # First segment, use first data point
+                                y_values.append(Y[0])
+                            # Interpolate from previous point
+                            if len(y_values) > 0:
+                                y_values.append(y_values[-1])
+                            else:
+                                y_values.append(Y[0])
+
+                    return all_bps, np.array(y_values)
+                else:
+                    # No forced breakpoints, return automatic result
+                    return px_auto, py_auto
 
             max_bps = int(
                 np.ceil(len(emissions) / 5)
@@ -442,6 +479,7 @@ class EmissionsPeakTest:
             trend_info = {
                 "method": "broken-trend analysis",
                 "number_of_breakpoints": len(breakpoints),
+                "breakpoints": breakpoints
             }
 
         elif method in ["hp", "hodrick_prescott"]:
