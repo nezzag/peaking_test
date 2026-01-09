@@ -213,6 +213,11 @@ class EmissionsPeakTest:
         if self.historical_data is None:
             raise ValueError("Must load historical data first")
         
+        if include_test_data:
+            if self.emissions_data is None:
+                raise ValueError("To run noise parameterisation with `include_test_data=True`" \
+                "you must first provide test data")
+        
         self.residuals, self.trend, self.trend_info = self._calculate_residuals(
             method, ignore_years, include_test_data, **kwargs
         )
@@ -1000,22 +1005,31 @@ class EmissionsPeakTest:
         plt.show()
         return
 
-    def _plot_historical_and_test_data(self, ax: plt.Axes) -> None:
-        """Plot historical data with test data overlay"""
+    def _plot_historical_and_test_data(self, ax: plt.Axes, historical_kwargs=None, test_kwargs=None) -> None:
+        """Plot historical data with test data overlay
+
+        Args:
+            ax: matplotlib Axes object
+            historical_kwargs: dict of plotting kwargs for historical data (default: {"color": "b", "linestyle": "-", "alpha": 0.7})
+            test_kwargs: dict of plotting kwargs for test data (default: {"color": "k", "marker": "+", "linestyle": "", "linewidth": 1, "markersize": 5})
+        """
+        # Set default kwargs
+        default_historical_kwargs = {"color": "b", "linestyle": "-", "alpha": 0.7, "label": "Historical emissions"}
+        default_test_kwargs = {"color": "k", "marker": "+", "linestyle": "", "linewidth": 1, "markersize": 5, "label": "Recent test data"}
+
+        # Merge user-provided kwargs with defaults (user kwargs take precedence)
+        hist_plot_kwargs = {**default_historical_kwargs, **(historical_kwargs or {})}
+        test_plot_kwargs = {**default_test_kwargs, **(test_kwargs or {})}
+
         ax.plot(
             self.historical_data["year"],
             self.historical_data["emissions"],
-            "b-",
-            alpha=0.7,
-            label="Historical emissions",
+            **hist_plot_kwargs,
         )
         ax.plot(
             self.test_data["year"],
             self.test_data["emissions"],
-            "k+",
-            linewidth=1,
-            markersize=5,
-            label="Recent test data",
+            **test_plot_kwargs,
         )
 
         ax.set_xlabel("Year")
@@ -1024,14 +1038,23 @@ class EmissionsPeakTest:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_historical_trend(self, ax: plt.Axes) -> None:
-        """Plot historical trend data"""
+    def _plot_historical_trend(self, ax: plt.Axes, **kwargs) -> None:
+        """Plot historical trend data
+
+        Args:
+            ax: matplotlib Axes object
+            **kwargs: Additional plotting arguments (default: {"color": "b", "linestyle": "-", "alpha": 0.7})
+        """
+        # Set default kwargs
+        default_kwargs = {"color": "b", "linestyle": "-", "alpha": 0.7, "label": "Trend"}
+
+        # Merge user-provided kwargs with defaults (user kwargs take precedence)
+        plot_kwargs = {**default_kwargs, **kwargs}
+
         ax.plot(
             self.trend.index,
             self.trend.values,
-            "b-",
-            alpha=0.7,
-            label="Historical emissions",
+            **plot_kwargs,
         )
 
         ax.set_xlabel("Year")
@@ -1040,10 +1063,21 @@ class EmissionsPeakTest:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_historical_noise(self, ax: plt.Axes) -> None:
-        """Plot historical noise data"""
+    def _plot_historical_noise(self, ax: plt.Axes, **kwargs) -> None:
+        """Plot historical noise data
+
+        Args:
+            ax: matplotlib Axes object
+            **kwargs: Additional plotting arguments (default: {"color": "orange", "style": "-"})
+        """
+        # Set default kwargs
+        default_kwargs = {"color": "orange", "style": "-", "label": "Residuals"}
+
+        # Merge user-provided kwargs with defaults (user kwargs take precedence)
+        plot_kwargs = {**default_kwargs, **kwargs}
+
         self.residuals.plot(
-            ax=ax, label="Historical emissions", color="orange", style="-"
+            ax=ax, **plot_kwargs
         )
 
         ax.set_xlabel("Year")
@@ -1053,31 +1087,51 @@ class EmissionsPeakTest:
         ax.axhline(y=0, color="k", lw=1)
         ax.grid(True, alpha=0.3)
 
-    def _plot_noise_distribution(self, ax: plt.Axes) -> None:
-        """Plot the fitted noise distribution."""
-            # Plot original residuals
+    def _plot_noise_distribution(self, ax: plt.Axes, residuals_kwargs=None, innovations_kwargs=None) -> None:
+        """Plot the fitted noise distribution.
+
+        Args:
+            ax: matplotlib Axes object
+            residuals_kwargs: dict of plotting kwargs for residuals histogram
+                (default: {"bins": 30, "density": True, "alpha": 0.5, "color": "skyblue", "edgecolor": "blue", "linewidth": 0.5})
+            innovations_kwargs: dict of plotting kwargs for innovations histogram
+                (default: {"bins": 30, "density": True, "alpha": 0.5, "color": "green", "edgecolor": "darkgreen", "linewidth": 0.5})
+        """
+        # Set default kwargs
+        default_residuals_kwargs = {
+            "bins": 30,
+            "density": True,
+            "alpha": 0.5,
+            "color": "skyblue",
+            "label": "Original residuals",
+            "edgecolor": "blue",
+            "linewidth": 0.5
+        }
+        default_innovations_kwargs = {
+            "bins": 30,
+            "density": True,
+            "alpha": 0.5,
+            "color": "green",
+            "label": "Innovations (after AR removal)",
+            "edgecolor": "darkgreen",
+            "linewidth": 0.5
+        }
+
+        # Merge user-provided kwargs with defaults (user kwargs take precedence)
+        res_plot_kwargs = {**default_residuals_kwargs, **(residuals_kwargs or {})}
+        innov_plot_kwargs = {**default_innovations_kwargs, **(innovations_kwargs or {})}
+
+        # Plot original residuals
         ax.hist(
             self.residuals,
-            bins=30,
-            density=True,
-            alpha=0.5,  # More transparent so both visible
-            color="skyblue",
-            label="Original residuals",
-            edgecolor='blue',
-            linewidth=0.5
+            **res_plot_kwargs
         )
-        
+
         # Plot innovations (if autocorrelation was detected and removed)
         if self.autocorr_params["has_autocorr"] and self.autocorr_params["is_stationary"]:
             ax.hist(
                 self.autocorr_params['residuals'],
-                bins=30,
-                density=True,
-                alpha=0.5,  # More transparent so both visible
-                color="green",
-                label="Innovations (after AR removal)",
-                edgecolor='darkgreen',
-                linewidth=0.5
+                **innov_plot_kwargs
             )
         # Overlay fitted distribution
         # # TODO: Does this make sense to do with an autocorrelated system?
@@ -1096,22 +1150,42 @@ class EmissionsPeakTest:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    def _plot_bootstrap_results(self, ax: plt.Axes) -> None:
-        """Plot bootstrap distribution with observed slope."""
+    def _plot_bootstrap_results(self, ax: plt.Axes, hist_kwargs=None, vline_kwargs=None) -> None:
+        """Plot bootstrap distribution with observed slope.
+
+        Args:
+            ax: matplotlib Axes object
+            hist_kwargs: dict of plotting kwargs for histogram
+                (default: {"bins": 50, "density": True, "alpha": 0.7, "color": "lightgreen"})
+            vline_kwargs: dict of plotting kwargs for vertical line
+                (default: {"color": "red", "linewidth": 2})
+        """
+        # Set default kwargs
+        default_hist_kwargs = {
+            "bins": 50,
+            "density": True,
+            "alpha": 0.7,
+            "color": "lightgreen",
+            "label": "Bootstrap slopes\n(null hypothesis)",
+        }
+        default_vline_kwargs = {
+            "color": "red",
+            "linewidth": 2,
+            "label": f'Observed slope\n{self.bootstrap_results["test_slope"]:.1f} {self.unit}',
+        }
+
+        # Merge user-provided kwargs with defaults (user kwargs take precedence)
+        hist_plot_kwargs = {**default_hist_kwargs, **(hist_kwargs or {})}
+        vline_plot_kwargs = {**default_vline_kwargs, **(vline_kwargs or {})}
+
         ax.hist(
             self.bootstrap_results["bootstrap_slopes"],
-            bins=50,
-            density=True,
-            alpha=0.7,
-            color="lightgreen",
-            label="Bootstrap slopes\n(null hypothesis)",
+            **hist_plot_kwargs,
         )
 
         ax.axvline(
             self.bootstrap_results["test_slope"],
-            color="red",
-            linewidth=2,
-            label=f'Observed slope\n{self.bootstrap_results["test_slope"]:.1f} {self.unit}',
+            **vline_plot_kwargs,
         )
 
         ax.set_xlabel(f"Slope: {self.unit}")
