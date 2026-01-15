@@ -759,7 +759,7 @@ class EmissionsPeakTest:
         return self.noise_generator
 
     def set_test_data(
-        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10
+        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 5
     ) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
