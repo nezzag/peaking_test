@@ -103,11 +103,16 @@ if Config.sensitivity_analyses['method_test']:
             label=method
         )
     ax.plot(test_peaker.emissions_data.year, test_peaker.emissions_data.emissions, 'k--', label='hist&test_data' )
-    ax.set_xlim(2010, 2030)
-    ax.set_ylim(25000, 40000)
+    ax.set_xlim(1990, 2030)
+    ymax = test_peaker.emissions_data.emissions.max()*1.05
+    ymin = test_peaker.emissions_data.emissions.min()*0.95
+    ax.set_ylim(ymin, ymax)
+    ax.set_title(f'Trend estimates: {title_str}: different methods')
+    # ax.set_ylim(25000, 40000)
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.savefig('./outputs/figures/method_trends.png',dpi=300)
+    plt.show()
 
     print('-'*50 + '\n standard deviation in residuals:\n' + '-'*50)
     print(residuals.std(axis=1))
@@ -137,13 +142,14 @@ if Config.sensitivity_analyses['lowess_fraction_test']:
                 .characterize_noise(method='lowess',fraction=frac)
                 .create_noise_generator()
             )
-            (    test_peaker
-                .set_test_data([
-                    (2025, 37700),
-                    (2026, 37580), 
-                    (2027, 37460),
-                ]).run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
-            )
+            # (    test_peaker
+            #     .set_test_data([
+            #         (2025, 37700),
+            #         (2026, 37580), 
+            #         (2027, 37460),
+            #     ]).run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
+            # )
+            (test_peaker.run_complete_bootstrap_test(bootstrap_method='ar_bootstrap'))
 
 
             noise_params.append(test_peaker.autocorr_params)
@@ -174,13 +180,14 @@ if Config.sensitivity_analyses['noise_distribution_test']:
                 .characterize_noise(method='lowess',noise_type=noise_type)
                 .create_noise_generator()
             )
-            (    test_peaker
-                .set_test_data([
-                    (2025, 37700),
-                    (2026, 37580), 
-                    (2027, 37460)
-                ]).run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
-            )
+            # (    test_peaker
+            #     .set_test_data([
+            #         (2025, 37700),
+            #         (2026, 37580), 
+            #         (2027, 37460)
+            #     ]).run_complete_bootstrap_test(bootstrap_method='ar_bootstrap')
+            # )
+            (test_peaker.run_complete_bootstrap_test(bootstrap_method='ar_bootstrap'))
 
             noise_params.append(test_peaker.autocorr_params)
             peaking_likelihood.loc[noise_type] = 1 - test_peaker.bootstrap_results['p_value_one_tail']
