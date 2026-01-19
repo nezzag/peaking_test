@@ -20,8 +20,8 @@ if Config.sensitivity_analyses['emissions']:
 elif Config.sensitivity_analyses['carbon_intensity']:
     title_str = "carbon_intensity"
     hist_data = "carbon_intensity_gdp.csv"
-    null_hypothesis = '2pc_decline'
-    print("Running sensitivity analysis on carbon intensity data with null hypothesis of 2% per year decline")   
+    null_hypothesis = 'recent_trend'
+    print("Running sensitivity analysis on carbon intensity data with null hypothesis of deviation from the recent trend decline")   
 
 else:
     raise ValueError("Script is only set up to look at emissions or carbon_intensity currently")

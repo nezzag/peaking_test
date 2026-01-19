@@ -817,7 +817,7 @@ class EmissionsPeakTest:
 
         Args:
             null_hypothesis: Three options:
-                - "recent_trend" (testing if new data is consistent with recent trend)
+                - "recent_trend" (testing if new data is consistent with recent trend, using n of years defined below)
                 - "zero_trend" (testing if new data is consistent with a zero trend)
                 - "2pc_decline" (testing if new data is consistent with a 2% per year decline)
                 - "3pc_decline" (testing if new data is consistent with a 3% per year decline)

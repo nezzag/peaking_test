@@ -1,12 +1,12 @@
 class Config:
     sensitivity_analyses = {
         # Choice of emissions or carbon intensity first
-        'emissions': True,
-        'carbon_intensity': False,
+        'emissions': 1,
+        'carbon_intensity': 0,
         # Choice of tests
-        'method_test': True,
-        'lowess_fraction_test': False,
-        'noise_distribution_test': False,
-        'aic_bic_comparison': False,
+        'method_test': 1,
+        'lowess_fraction_test': 0,
+        'noise_distribution_test': 1,
+        'aic_bic_comparison': 1,
     }
     
