@@ -759,8 +759,7 @@ class EmissionsPeakTest:
         return self.noise_generator
 
     def set_test_data(
-        self, test_data: List[Tuple[int, float]], recent_years_for_trend: int = 10
-    ) -> "EmissionsPeakTest":
+        self, test_data: List[Tuple[int, float]]) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
 
@@ -771,13 +770,13 @@ class EmissionsPeakTest:
             Self for method chaining
         """
 
-        recent_data = self.historical_data.tail(recent_years_for_trend)
-        X_recent = recent_data["year"].values.reshape(-1, 1)
-        y_recent = recent_data["emissions"].values
+        # recent_data = self.historical_data.tail(recent_years_for_trend)
+        # X_recent = recent_data["year"].values.reshape(-1, 1)
+        # y_recent = recent_data["emissions"].values
 
-        model_recent = LinearRegression()
-        model_recent.fit(X_recent, y_recent)
-        self.recent_historical_trend = model_recent.coef_[0]
+        # model_recent = LinearRegression()
+        # model_recent.fit(X_recent, y_recent)
+        # self.recent_historical_trend = model_recent.coef_[0]
 
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
@@ -792,9 +791,6 @@ class EmissionsPeakTest:
         )
         print(
             f"Test slope: {self.test_slope:.2f} {self.unit} (R² = {self.test_r2:.3f})"
-        )
-        print(
-            f"Recent historical trend: {self.recent_historical_trend:.2f} {self.unit}"
         )
 
         return self
@@ -814,6 +810,7 @@ class EmissionsPeakTest:
         n_bootstrap: int = 10000,
         null_hypothesis: str | float = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
+        n_years_for_trend: int = 5
     ) -> Dict:
         """
         Run complete bootstrap test with all enhancements.
@@ -826,6 +823,7 @@ class EmissionsPeakTest:
                 - "3pc_decline" (testing if new data is consistent with a 3% per year decline)
                 - float: Give a specific trend to test if new data is consistent with
             bootstrap_method: "ar_bootstrap", "white_noise"
+            n_years_for_trend: int (number of years used to calculate recent trend)
         """
         if self.noise_generator is None:
             self.create_noise_generator()
@@ -838,6 +836,15 @@ class EmissionsPeakTest:
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
 
+        # calculate recent trend 
+        recent_data = self.historical_data.tail(n_years_for_trend)
+        X_recent = recent_data["year"].values.reshape(-1, 1)
+        y_recent = recent_data["emissions"].values
+        model_recent = LinearRegression()
+        model_recent.fit(X_recent, y_recent)
+        self.recent_historical_trend = model_recent.coef_[0]
+
+        # bootstrapping
         bootstrap_slopes = self._generate_bootstrap_slopes(
             n_bootstrap, null_hypothesis, bootstrap_method
         )
