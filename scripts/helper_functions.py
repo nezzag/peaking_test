@@ -102,6 +102,7 @@ NAME_REPLACE = {
     "United Republic of Tanzania": "TZA",
     "Timor-Leste, Democratic Republic of": "TLS",
     "Türkiye, Republic of": "TUR",
+    "US":"USA",
     "Uzbekistan, Republic of": "UZB",
     "Vietnam": "VNM",
     "Venezuela": "VEN",
