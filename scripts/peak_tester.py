@@ -836,9 +836,9 @@ class EmissionsPeakTest:
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
 
-        # calculate recent trend 
-        recent_data = self.historical_data.tail(n_years_for_trend)
-        X_recent = recent_data["year"].values.reshape(-1, 1)
+        # calculate recent trend (excluding most recent year)
+        recent_data = self.historical_data.tail(n_years_for_trend+1).iloc[:-1] # Exclude most recent year to avoid overlap with test data
+        X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
         y_recent = recent_data["emissions"].values
         model_recent = LinearRegression()
         model_recent.fit(X_recent, y_recent)

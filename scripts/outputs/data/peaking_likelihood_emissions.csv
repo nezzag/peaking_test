@@ -1,0 +1,8 @@
+,likelihood_of_peaking
+linear,0.7352000000000001
+linear_w_autocorrelation,0.737
+broken_trend,0.8097
+hp,0.8110999999999999
+hamilton,0.7150000000000001
+spline,0.8447
+lowess,0.8048
