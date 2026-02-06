@@ -903,7 +903,7 @@ class EmissionsPeakTest:
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
             null_trend = self.recent_historical_trend
-        elif isinstance(null_hypothesis, float):
+        elif isinstance(null_hypothesis, (int,float)):
             null_trend = null_hypothesis
         elif null_hypothesis == "2pc_decline":
             null_trend = -0.02 * baseline_emissions
