@@ -52,7 +52,14 @@ def plot_single_entity(entity_name, plot_data, figsize=(10, 8)):
     return fig
 
 def plot_all_entities(plot_data, hist_data, entities=None, save_path = None):
-    """Plot all entities in a grid"""
+    """Plot all entities in a grid
+
+    args:
+        plot_data (dict): Dictionary with entity names as keys and their LMDI data.
+        hist_data (dict): Dictionary with historical data (e.g., carbon intensity as function of GDP).
+        entities (list, optional): List of entity names to plot. If None, plot all
+    
+    """
     if entities is None:
         entities = list(plot_data.keys())
     
@@ -272,65 +279,66 @@ def plot_all_entities(plot_data, hist_data, entities=None, save_path = None):
 
 
 
-
+if __name__ == "__main__":
 # Usage in interactive session or notebook:
 # %%
 # import importlib
 
 # importlib.reload(lmdi_analysis)
-from lmdi_analysis import LMDIPeakAnalyzer
-# from lmdi_plotting import setup_plot_style, plot_single_entity, plot_all_entities
+    from lmdi_analysis import LMDIPeakAnalyzer
+    # from lmdi_plotting import setup_plot_style, plot_single_entity, plot_all_entities
 
-# # Run analysis once
-analyzer = LMDIPeakAnalyzer()
+    # # Run analysis once
+    analyzer = LMDIPeakAnalyzer()
 
-# analyzer.load_all_data(regions = ['WLD','CHN', 'IND', 'DEU', 'JPN', 'BRA', 'ZAF'])
-# analyzer.run_complete_analysis(regions = ['CHN', 'DEU', 'WLD'],
-#                                report = False)
+    # analyzer.load_all_data(regions = ['WLD','CHN', 'IND', 'DEU', 'JPN', 'BRA', 'ZAF'])
+    # analyzer.run_complete_analysis(regions = ['CHN', 'DEU', 'WLD'],
+    #                                report = False)
 
-# # # Get plot data
-# plot_data = analyzer.get_plot_data()
-# hist_data = analyzer.historical_data
-# # # Now experiment with plots
-# setup_plot_style()
+    # # # Get plot data
+    # plot_data = analyzer.get_plot_data()
+    # hist_data = analyzer.historical_data
+    # # # Now experiment with plots
+    # setup_plot_style()
 
-# # # %% Try different entities
-# # fig = plot_single_entity('USA', plot_data)
-# # plt.show()
+    # # # %% Try different entities
+    # # fig = plot_single_entity('USA', plot_data)
+    # # plt.show()
 
-# # # %% Try different colors/styles - just edit plot_single_entity() and rerun
-# # fig = plot_single_entity('CHN', plot_data, figsize=(12, 10))
-# # plt.show()
+    # # # %% Try different colors/styles - just edit plot_single_entity() and rerun
+    # # fig = plot_single_entity('CHN', plot_data, figsize=(12, 10))
+    # # plt.show()
 
-# # # %% Plot all at once
-# fig = plot_all_entities(plot_data = plot_data, hist_data = hist_data, save_path = './outputs/figures/lmdi_decomposition_plots_small.png')
+    # # # %% Plot all at once
+    # fig = plot_all_entities(plot_data = plot_data, hist_data = hist_data, save_path = './outputs/figures/lmdi_decomposition_plots_small.png')
 
-# plt.show()
+    # plt.show()
 
-analyzer.load_all_data(regions = ['WLD'])
-analyzer.prepare_lmdi_data()
+    analyzer.load_all_data(regions = ['WLD', 'CHN'])
+    analyzer.prepare_lmdi_data()
 
-gdp_2025 = analyzer.historical_data['gdp'].loc[(analyzer.historical_data['gdp']['year'] == 2024) &
-                                               (analyzer.historical_data['gdp']['region'] == 'WLD'), 'gdp'].values[0] * 1.03  # Assume 3% growth
+    gdp_2025 = analyzer.historical_data['gdp'].loc[(analyzer.historical_data['gdp']['year'] == 2024) &
+                                                (analyzer.historical_data['gdp']['region'] == 'WLD'), 'gdp'].values[0] * 1.03  # Assume 3% growth
 
-pe_2025 = analyzer.historical_data['primary_energy'].loc[(analyzer.historical_data['primary_energy']['year'] == 2024) &
-                                        (analyzer.historical_data['primary_energy']['region'] == 'WLD'), 'primary_energy'].values[0] * 1.02  # Assume 2% growth
+    pe_2025 = analyzer.historical_data['primary_energy'].loc[(analyzer.historical_data['primary_energy']['year'] == 2024) &
+                                            (analyzer.historical_data['primary_energy']['region'] == 'WLD'), 'primary_energy'].values[0] * 1.02  # Assume 2% growth
 
 
-test_data = {
-    2025: {
-        'WLD': {
-            'co2': 38980,  # Example CO2 emissions in Mt
-            'gdp': gdp_2025,
-            'primary_energy': pe_2025  # Example primary energy in Mtoe
+    test_data = {
+        2025: {
+            'WLD': {
+                'co2': 38980,  # Example CO2 emissions in Mt
+                'gdp': gdp_2025,
+                'primary_energy': pe_2025  # Example primary energy in Mtoe
+            }
         }
-    }
-}   
+    }   
 
-# analyzer.add_test_data(test_data)
-analyzer.analyze_all_entities()
-analyzer.detect_structural_peaks()
-plot_data = analyzer.get_plot_data()
-setup_plot_style()
-fig = plot_single_entity('WLD', plot_data, figsize=(12, 10))
-plt.show()
+    # analyzer.add_test_data(test_data)
+    analyzer.analyze_all_entities()
+    analyzer.detect_structural_peaks()
+    plot_data = analyzer.get_plot_data()
+    setup_plot_style()
+    # fig = plot_single_entity('WLD', plot_data, figsize=(12, 10))
+    fig = plot_all_entities(plot_data = plot_data, hist_data = analyzer.historical_data)
+    plt.show()
