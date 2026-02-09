@@ -42,8 +42,9 @@ gdp = gdp.droplevel(["region_name", "id"])
 gdp = gdp.pix.assign(
     region_name=[iso_to_name(iso) for iso in gdp.pix.project("region").index],
     variable="GDP",
-    unit="USD2015",
-)
+    unit="trillion USD2015",
+)/1e12
+
 gdp = gdp.reorder_levels(IX_ORDER)
 gdp = gdp.dropna(how="all", axis=1)
 gdp.columns = gdp.columns.astype(int)
@@ -75,14 +76,14 @@ pe.to_csv("data/processed/primary_energy.csv")
 
 ci_gdp = (fossil_co2 / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
     how="all", axis=1
-) * 1e9
-ci_gdp = ci_gdp.pix.assign(variable="Carbon Intensity", unit="kg CO2 / $")
+)
+ci_gdp = ci_gdp.pix.assign(variable="Carbon Intensity", unit="g CO2 / $")
 ci_gdp.to_csv("data/processed/carbon_intensity_gdp.csv")
 
 
 ei_gdp = (pe / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
     how="all", axis=1
-) * 1e12
+)
 ei_gdp = ei_gdp.pix.assign(variable="Energy Intensity", unit="MJ / $")
 ei_gdp.to_csv("data/processed/energy_intensity_gdp.csv")
 
