@@ -48,19 +48,22 @@ class MahalanobisTest:
         n_bootstrap: int = 10000,
         null_hypothesis: str = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
-        use_empirical_covariance: bool = False
+        use_empirical_covariance: bool = False,
+        force_white_noise: bool = False
     ) -> Dict:
         """
         Run Mahalanobis distance test.
-        
+
         Args:
             n_bootstrap: Number of bootstrap samples
             null_hypothesis: "zero_trend", "recent_trend", or a float
             bootstrap_method: "ar_bootstrap" or "white_noise"
             use_empirical_covariance: If True, estimate covariance from bootstrap samples
-                                      If False, use theoretical covariance 
+                                      If False, use theoretical covariance
                                       from the noise parameterisation step
-        
+            force_white_noise: If True, build a diagonal (white noise) covariance matrix
+                              even if autocorrelation is present. Default False. 
+
         Returns:
             Dictionary with test results
         """
@@ -72,6 +75,13 @@ class MahalanobisTest:
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
         print(f"  Covariance: {'Empirical' if use_empirical_covariance else 'Theoretical AR(1)'}")
+        
+        # Enforce that if we force a white noise (no autocorrelation approach),
+        # that this is transmitted through to the bootstrap_method
+        if force_white_noise:
+            bootstrap_method = 'white_noise'
+            print("Argument force_white_noise set as true: Forcing bootstrap_method to white noise also")
+            
         
         # Generate bootstrap trajectories
         bootstrap_data = self._generate_bootstrap_trajectories(
@@ -87,9 +97,11 @@ class MahalanobisTest:
             print(f"\nCovariance estimated from {n_bootstrap} bootstrap samples")
         else:
             # Use theoretical AR(1) or white noise covariance
-            self.covariance_matrix = self._build_theoretical_covariance()
+            self.covariance_matrix = self._build_theoretical_covariance(force_white_noise=force_white_noise)
             phi = self.peak_test.autocorr_params["phi"]
-            if abs(phi) > 0.1:
+            if force_white_noise:
+                print(f"\nUsing white noise covariance (forced, ignoring φ={phi:.3f})")
+            elif abs(phi) > 0.1:
                 print(f"\nUsing AR(1) covariance with φ={phi:.3f}")
             else:
                 print(f"\nUsing white noise covariance (φ≈0)")
@@ -107,7 +119,8 @@ class MahalanobisTest:
         # Calculate Mahalanobis distances for bootstrap samples
         bootstrap_mahal = []
         for deviations in bootstrap_data['deviations']:
-            mahal = self._calculate_mahalanobis(deviations, self.covariance_matrix)
+            mahal = self._calculate_mahalanobis(deviations, self.covariance_matrix) 
+            #TODO: If we force bootstrap method to be white-noise, we should do something here also 
             bootstrap_mahal.append(mahal)
         
         bootstrap_mahal = np.array(bootstrap_mahal)
@@ -172,18 +185,21 @@ class MahalanobisTest:
         
         return self.results
     
-    def _build_theoretical_covariance(self) -> np.ndarray:
+    def _build_theoretical_covariance(self, force_white_noise: bool = False) -> np.ndarray:
         """
         Build theoretical covariance matrix based on noise model.
-        
+
         For AR(1): Σ[i,j] = σ² * φ^|i-j| / (1-φ²)
         For white noise (φ≈0): Σ[i,j] = σ² if i==j, else 0
+
+        Args:
+            force_white_noise: If True, use diagonal covariance regardless of φ
         """
         n = len(self.peak_test.test_data)
         phi = self.peak_test.autocorr_params["phi"]
         sigma = self.peak_test.autocorr_params["sigma_residuals"]
-        
-        if abs(phi) < 0.1:
+
+        if force_white_noise or abs(phi) < 0.1:
             # White noise: diagonal covariance matrix
             Sigma = np.eye(n) * sigma**2
             print(f"  Building white noise covariance (σ={sigma:.1f})")

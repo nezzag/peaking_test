@@ -104,7 +104,7 @@ class EmissionsPeakTest:
         self,
         data_source: Union[str, pd.DataFrame],
         region: str = "WLD",
-        year_range: range = range(1970, 2020),
+        year_range: range = range(1970, 2025),
     ) -> "EmissionsPeakTest":
         """
         Load historical emissions data.
@@ -161,6 +161,14 @@ class EmissionsPeakTest:
 
         # Validate data
         self._validate_historical_data()
+
+        # calculate recent trend (excluding most recent year)
+        recent_data = self.historical_data.tail(5)
+        X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
+        y_recent = recent_data["emissions"].values
+        model_recent = LinearRegression()
+        model_recent.fit(X_recent, y_recent)
+        self.recent_historical_trend = model_recent.coef_[0]
 
         print(
             f"Loaded historical data: {self.historical_data['year'].min()}-{self.historical_data['year'].max()}"
@@ -770,14 +778,6 @@ class EmissionsPeakTest:
             Self for method chaining
         """
 
-        # recent_data = self.historical_data.tail(recent_years_for_trend)
-        # X_recent = recent_data["year"].values.reshape(-1, 1)
-        # y_recent = recent_data["emissions"].values
-
-        # model_recent = LinearRegression()
-        # model_recent.fit(X_recent, y_recent)
-        # self.recent_historical_trend = model_recent.coef_[0]
-
         self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
         self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
 
@@ -808,7 +808,7 @@ class EmissionsPeakTest:
     def run_complete_bootstrap_test(
         self,
         n_bootstrap: int = 10000,
-        null_hypothesis: str | float = "zero_trend",
+        null_hypothesis: str | float | int = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
         n_years_for_trend: int = 5
     ) -> Dict:
@@ -836,8 +836,10 @@ class EmissionsPeakTest:
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
 
-        # calculate recent trend (excluding most recent year)
-        recent_data = self.historical_data.tail(n_years_for_trend+1).iloc[:-1] # Exclude most recent year to avoid overlap with test data
+        # Recalculate recent trend -> if the n_recent_years has changed from 5,
+        # which is the default
+        
+        recent_data = self.historical_data.tail(n_years_for_trend) # Exclude most recent year to avoid overlap with test data
         X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
         y_recent = recent_data["emissions"].values
         model_recent = LinearRegression()
