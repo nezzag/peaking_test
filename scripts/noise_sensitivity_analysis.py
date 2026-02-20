@@ -34,15 +34,15 @@ if Config.sensitivity_analyses['emissions']:
     # Testing a 1% decline in emissions per year
     test_peaker.set_test_data([
         (2025, test_peaker.historical_data.iloc[-1,1]),
-        (2026, test_peaker.historical_data.iloc[-1,1]*(0.99 + np.random.rand()*0.0075)),
-        (2027, test_peaker.historical_data.iloc[-1,1]*(0.99**2 + np.random.rand()*0.0075))]) 
+        (2026, test_peaker.historical_data.iloc[-1,1]*(0.99)),
+        (2027, test_peaker.historical_data.iloc[-1,1]*(0.99**2))]) 
 
 else:
     # Testing a 2% decline in carbon intensity per year
     test_peaker.set_test_data([
         (2025, test_peaker.historical_data.iloc[-1,1]),
-        (2026, test_peaker.historical_data.iloc[-1,1]*(0.98 + np.random.rand()*0.0075)),
-        (2027, test_peaker.historical_data.iloc[-1,1]*(0.96**2 + np.random.rand()*0.0075))])
+        (2026, test_peaker.historical_data.iloc[-1,1]*(0.98)),
+        (2027, test_peaker.historical_data.iloc[-1,1]*(0.98**2))])
 
 # -------------------------------------------
 # Test 1: How do different methods provide 
@@ -69,7 +69,7 @@ if Config.sensitivity_analyses['method_test']:
         "lowess",
     ]:
         with HiddenPrints():
-            test_peaker.characterize_noise(method=method, noise_type="normal", include_test_data=True, forced_breakpoints=[2025])
+            test_peaker.characterize_noise(method=method, include_test_data=True, forced_breakpoints=[2025])
             residuals.loc[method] = test_peaker.residuals
             trend.loc[method] = test_peaker.trend
             autocorr.loc[method] = test_peaker.autocorr_params['has_autocorr']
@@ -177,7 +177,7 @@ if Config.sensitivity_analyses['noise_distribution_test']:
         for noise_type in ["normal", "t-dist", "empirical"]:
             (
                 test_peaker
-                .characterize_noise(method='lowess',noise_type=noise_type)
+                .characterize_noise(method='broken_trend',noise_type=noise_type)
                 .create_noise_generator()
             )
             # (    test_peaker
@@ -310,7 +310,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
             return 5  # Approximate as 4 parameters 
         
         else:
-            # Default: assume moderate complexity
+            # Default: assume moderate complexity -> 
             print("using default value of k = 20% of n for method:", method)
             return int(n * 0.2)
 
@@ -351,7 +351,7 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
         for params in param_configs:
             try:
                 # Calculate residuals using this method
-                residuals, trend, trend_info = test_peaker._calculate_residuals(method_name, **params)
+                residuals, trend, trend_info = test_peaker._calculate_residuals(method_name,ignore_years=[2020], **params)
                 years_to_use = residuals.index.values
                 # Calculate goodness of fit metrics
                 n = len(residuals)
@@ -362,7 +362,6 @@ if Config.sensitivity_analyses['aic_bic_comparison']:
                 k = get_effective_parameters(method_name, n, params, trend_info, years_to_use)
                 
                 # Calculate information criteria
-                # Neil: This AIC model works for a linear fit, need to look further into this
                 AIC = n * np.log(sigma_squared) + 2 * k
                 BIC = n * np.log(sigma_squared) + k * np.log(n)
                 
