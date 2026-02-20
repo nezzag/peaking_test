@@ -198,7 +198,7 @@ class EmissionsPeakTest:
     def characterize_noise(
         self,
         method: str = "lowess",
-        noise_type: str = "normal",
+        noise_type: str = "t-dist",
         t_df: Optional[float] = None,
         ignore_years: list = None,
         include_test_data: bool = False,
@@ -213,7 +213,10 @@ class EmissionsPeakTest:
             t_df: Optional fixed degrees of freedom for t-distribution
             ignore_years: Years to exclude
             include_test_data: Whether or not to include the test data in the system or not
-            **kwargs: Additional arguments for specific methods
+            **kwargs: Additional arguments for specific methods. These include:
+                - fraction: float = 0.3. Use in lowess method, change to reduce/increase the width of 
+                dataset over which lowess is calculated
+                - forced_breakpoints: list[int]. use in broken_trend to force certain breakpoints
 
         Returns:
             Self for method chaining
@@ -267,8 +270,8 @@ class EmissionsPeakTest:
 
 
         if ignore_years:
-            hist_data.loc[hist_data.year.isin(ignore_years)] = np.nan
-            hist_data = hist_data.interpolate()
+            hist_data.loc[hist_data.year.isin(ignore_years), 'emissions'] = np.nan
+            hist_data['emissions'] = hist_data['emissions'].interpolate()
 
         years = hist_data["year"].values
         emissions = hist_data["emissions"].values
@@ -576,7 +579,7 @@ class EmissionsPeakTest:
         return residuals, trend, trend_info
 
     def _analyze_autocorrelation(
-        self, noise_type: str = "normal", t_df: Optional[float] = None
+        self, noise_type: str = "t-dist", t_df: Optional[float] = None
     ) -> Dict:
         """
         Analyze autocorrelation in temporally-ordered residuals to check for any remaining structure.
@@ -705,7 +708,7 @@ class EmissionsPeakTest:
                     
             phi = self.autocorr_params["phi"]
             residuals_post_ar = self.autocorr_params["residuals"]
-            sigma = self.autocorr_params["sigma_residuals"]
+            sigma = self.autocorr_params["sigma_residuals"] #Focus on the standard deviation of the innovations
             mean = self.autocorr_params["mean_residuals"]
             noise_type = self.autocorr_params["noise_type"]
                 
@@ -717,10 +720,9 @@ class EmissionsPeakTest:
             ) -> np.ndarray:
                 """Generate AR(1) autocorrelated noise."""
                 if noise_type not in ["normal", "t-dist", "empirical"]:
-                    print(
+                    raise ValueError(
                         "enter method for adding noise ('normal', 't-dist' or 'empirical'"
                     )
-                    innovations = None
                 if noise_type == "normal":
                     innovations = np.random.normal(0, sigma, size)
                 elif noise_type == "t-dist":
@@ -733,7 +735,11 @@ class EmissionsPeakTest:
                 series = np.zeros(size)
                 if initial_value is None:
                     # Draw a random start value based on the historical residuals
-                    series[0] = np.random.normal(0, self.residuals.abs().mean())
+                    init_sigma = self.residuals.abs().mean()
+                    if noise_type == "t-dist":
+                        series[0] = np.random.standard_t(df_fitted) * init_sigma
+                    else:
+                        series[0] = np.random.normal(0, init_sigma)
                 else:
                     series[0] = initial_value
 
@@ -746,6 +752,8 @@ class EmissionsPeakTest:
 
         else:
             # If no autocorrelation is identified, then just use a whitenoise generator
+            # Here the residuals are taken straight from the decomposition, i.e. 
+            # no shift to focus on innovation residuals + autocorrelation
             sigma = np.std(self.residuals)
             mean = np.mean(self.residuals)
             scale = np.max(self.residuals) - np.min(self.residuals)
@@ -757,10 +765,15 @@ class EmissionsPeakTest:
                 print(f'Mean of residuals = {mean}')
 
             def white_noise_generator(
-                size: int, initial_value: float = 0
+                size: int
             ) -> np.ndarray:
                 """Generate white noise."""
-                return np.random.normal(0, sigma, size)
+                noise_type = self.autocorr_params["noise_type"]
+                if noise_type == "t-dist":
+                    df_fitted = self.autocorr_params["t_df_fitted"]
+                    return np.random.standard_t(df_fitted, size) * sigma
+                else:
+                    return np.random.normal(0, sigma, size)
 
             self.noise_generator = white_noise_generator
 
@@ -922,19 +935,19 @@ class EmissionsPeakTest:
             base_emissions = baseline_emissions + trend_component
 
             # Add autocorrelated noise
+            # Mirror the condition in create_noise_generator() exactly:
+            # use the AR(1) generator only if autocorrelation is both present and stationary.
             if (
                 bootstrap_method == "ar_bootstrap"
                 and self.autocorr_params["has_autocorr"]
+                and self.autocorr_params["is_stationary"]
             ):
                 # Use AR(1) noise generator. This creates the noise for all n_test_points in one go
-
-                noise = self.noise_generator(
-                    n_test_points, initial_value=None
-                )  # noise_type = self.autocorr_params['noise_type']
-            else:  # white_noise
-                noise = np.random.normal(
-                    0, self.autocorr_params["sigma_residuals"], n_test_points
-                )
+                noise = self.noise_generator(n_test_points, initial_value=None)
+            else:
+                # White noise: delegate to self.noise_generator (white_noise_generator),
+                # which was set up with the correct sigma and distribution in create_noise_generator().
+                noise = self.noise_generator(n_test_points)
 
             null_emissions = base_emissions + noise
 
@@ -1371,8 +1384,6 @@ if __name__ == "__main__":
         year_range=range(1970, 2024),
     )
 
-    # peak_test.characterize_noise(method="spline", noise_type="normal", s=25)
-    # peak_test.create_noise_generator()
     peak_test.set_test_data(
         [
             (2025, 37700),
@@ -1381,7 +1392,7 @@ if __name__ == "__main__":
             # (2028, 37400)
         ]
     )
-    peak_test.characterize_noise(method="spline", noise_type="normal", s=25, include_test_data=False)
+    peak_test.characterize_noise(method="spline", noise_type="t-dist", s=25, include_test_data=False)
     peak_test.create_noise_generator()
     peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
