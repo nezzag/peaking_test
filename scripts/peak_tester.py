@@ -849,15 +849,15 @@ class EmissionsPeakTest:
         print(f"  Bootstrap method: {bootstrap_method}")
         print(f"  Bootstrap samples: {n_bootstrap}")
 
-        # Recalculate recent trend -> if the n_recent_years has changed from 5,
-        # which is the default
-        
-        recent_data = self.historical_data.tail(n_years_for_trend) # Exclude most recent year to avoid overlap with test data
-        X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
-        y_recent = recent_data["emissions"].values
-        model_recent = LinearRegression()
-        model_recent.fit(X_recent, y_recent)
-        self.recent_historical_trend = model_recent.coef_[0]
+        # Recalculate recent trend (as by default this is set to 5 years)
+
+        if n_years_for_trend != 5:
+            recent_data = self.historical_data.tail(n_years_for_trend) # Exclude most recent year to avoid overlap with test data
+            X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
+            y_recent = recent_data["emissions"].values
+            model_recent = LinearRegression()
+            model_recent.fit(X_recent, y_recent)
+            self.recent_historical_trend = model_recent.coef_[0]
 
         # bootstrapping
         bootstrap_slopes = self._generate_bootstrap_slopes(
@@ -1297,7 +1297,7 @@ class EmissionsPeakTest:
         Bootstrap Analysis:
         • Samples: {results['n_bootstrap']:,}
         • P-value: {results['p_value_one_tail']:.4f}
-        • Significant: {results[f'significant_at_{signif_level}']}
+        • Significant at p={signif_level}: {results[f'significant_at_{signif_level}']}
         
         Noise Characteristics:
         • Method: {self.trend_info['method']}
