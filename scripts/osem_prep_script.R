@@ -1,34 +1,44 @@
-#' Prepare local multi-country (+ROW) dataset + OSEM spec + dictionary
+#' Prepare local multi-country (+WORLD-RESIDUAL) dataset + OSEM spec + dictionary
+#'
+#' This version constructs the residual block as:
+#'   X_RESID = X_WORLD - sum(X_focus)
+#' for X in {CO2, GDP, ENERGY}. Energy intensity for residual is computed as ENERGY_RESID/GDP_RESID.
+#'
+#' Assumption: the world aggregate is encoded as region == "World" in each input dataset.
 #'
 #' @param energy A tibble with columns: region, region_name, year, prim_ener (and others ok)
 #' @param gdp    A tibble with columns: region, region_name, year, gdp (and others ok)
 #' @param co2    A tibble with columns: region, region_name, year, co2 (and others ok)
 #' @param focus_countries Character vector of ISO3 country codes to model separately
-#'                        e.g. c("DEU","USA","CHN")
-#' @param include_row Logical; if TRUE create ROW = sum(all other regions)
+#' @param world_code Character; region code used for world aggregate (default "World")
+#' @param resid_name Character; suffix/name for residual block (default "RESID")
+#' @param include_resid Logical; if TRUE create the residual block
 #' @param year_to_date Logical; if TRUE convert numeric year to Date as YYYY-01-01
 #'                     (recommended for {osem}; it expects a Date 'time' column)
-#' @param log_safe_eps Small positive number used only if you later choose log transforms and
-#'                     want to avoid exact zeros (not applied by default).
+#' @param log_safe_eps Small positive number to replace exact zeros in values (off by default)
 #'
 #' @return A list with:
 #'   - local_data: long tibble with columns time, na_item, values
 #'   - specification: osem spec table (type/dependent/independent)
-#'   - dictionary: minimal dictionary marking all vars as local/identity
-#'   - wide_checks: optional wide tibbles useful for debugging (country + ROW series)
+#'   - dictionary: minimal dictionary marking all vars as local/identity (your schema)
+#'   - wide_checks: useful wide tibbles for debugging
 prepare_osem_co2_block <- function(
     energy,
     gdp,
     co2,
     focus_countries = c("DEU","USA","CHN"),
-    include_row = TRUE,
+    world_code = "WLD",
+    resid_name = "RESID",
+    include_resid = TRUE,
     year_to_date = TRUE,
     log_safe_eps = 0
 ) {
   stopifnot(is.data.frame(energy), is.data.frame(gdp), is.data.frame(co2))
   stopifnot(is.character(focus_countries), length(focus_countries) >= 1)
+  stopifnot(is.character(world_code), length(world_code) == 1)
+  stopifnot(is.character(resid_name), length(resid_name) == 1)
 
-  # ---- small helpers ----
+  # ---- helpers ----
   req_cols <- function(df, cols, df_name) {
     missing <- setdiff(cols, names(df))
     if (length(missing) > 0) {
@@ -41,8 +51,19 @@ prepare_osem_co2_block <- function(
 
   make_time <- function(y) {
     if (!year_to_date) return(y)
-    # turn 1965 -> "1965-01-01" Date
     as.Date(sprintf("%04d-01-01", as.integer(y)))
+  }
+
+  sum_with_na_guard <- function(df, value_col) {
+    df |>
+      dplyr::group_by(year) |>
+      dplyr::summarise(
+        value = sum(.data[[value_col]], na.rm = TRUE),
+        any_non_na = any(!is.na(.data[[value_col]])),
+        .groups = "drop"
+      ) |>
+      dplyr::mutate(value = dplyr::if_else(any_non_na, value, as.numeric(NA))) |>
+      dplyr::select(year, value)
   }
 
   # ---- validate columns ----
@@ -50,7 +71,7 @@ prepare_osem_co2_block <- function(
   req_cols(gdp,    c("region","year","gdp"),      "gdp")
   req_cols(co2,    c("region","year","co2"),      "co2")
 
-  # ---- keep only needed columns, ensure unique region-year ----
+  # ---- minimal, unique region-year ----
   energy0 <- energy |>
     dplyr::select(region, year, prim_ener) |>
     dplyr::distinct(region, year, .keep_all = TRUE)
@@ -63,49 +84,52 @@ prepare_osem_co2_block <- function(
     dplyr::select(region, year, co2) |>
     dplyr::distinct(region, year, .keep_all = TRUE)
 
-  # ---- compute energy intensity at country level ----
+  # ---- energy intensity per region (including world + focus countries) ----
   energ_int0 <- energy0 |>
     dplyr::left_join(gdp0, by = c("region","year")) |>
     dplyr::mutate(energ_int = prim_ener / gdp) |>
     dplyr::select(region, year, energ_int)
 
-  # ---- construct ROW series if requested ----
-  # Note: sums use na.rm=TRUE, but if *all* values are NA in a year, sum() returns 0.
-  # We'll set those to NA afterwards by tracking whether any non-NA existed.
-  row_pack <- NULL
-  if (isTRUE(include_row)) {
-    not_focus <- function(df) df |> dplyr::filter(!region %in% focus_countries)
+  # ---- build WORLD minus focus residual if requested ----
+  resid_pack <- NULL
+  if (isTRUE(include_resid)) {
+    # extract world series
+    world_co2 <- co20  |> dplyr::filter(region == world_code) |> dplyr::select(year, co2)       |> dplyr::rename(CO2_WORLD = co2)
+    world_gdp <- gdp0  |> dplyr::filter(region == world_code) |> dplyr::select(year, gdp)       |> dplyr::rename(GDP_WORLD = gdp)
+    world_en  <- energy0 |> dplyr::filter(region == world_code) |> dplyr::select(year, prim_ener) |> dplyr::rename(ENERGY_WORLD = prim_ener)
 
-    sum_with_na_guard <- function(df, value_col) {
-      df |>
-        dplyr::group_by(year) |>
-        dplyr::summarise(
-          value = sum(.data[[value_col]], na.rm = TRUE),
-          any_non_na = any(!is.na(.data[[value_col]])),
-          .groups = "drop"
-        ) |>
-        dplyr::mutate(value = dplyr::if_else(any_non_na, value, as.numeric(NA))) |>
-        dplyr::select(year, value)
-    }
+    # sum focus countries
+    focus_co2_sum <- sum_with_na_guard(co20  |> dplyr::filter(region %in% focus_countries), "co2")       |> dplyr::rename(CO2_FOCUS = value)
+    focus_gdp_sum <- sum_with_na_guard(gdp0  |> dplyr::filter(region %in% focus_countries), "gdp")       |> dplyr::rename(GDP_FOCUS = value)
+    focus_en_sum  <- sum_with_na_guard(energy0 |> dplyr::filter(region %in% focus_countries), "prim_ener") |> dplyr::rename(ENERGY_FOCUS = value)
 
-    co2_row   <- sum_with_na_guard(not_focus(co20), "co2")       |> dplyr::rename(CO2_ROW = value)
-    gdp_row   <- sum_with_na_guard(not_focus(gdp0), "gdp")       |> dplyr::rename(GDP_ROW = value)
-    en_row    <- sum_with_na_guard(not_focus(energy0), "prim_ener") |> dplyr::rename(ENERGY_ROW = value)
+    # align years and compute residuals
+    resid_df <- world_co2 |>
+      dplyr::full_join(world_gdp, by = "year") |>
+      dplyr::full_join(world_en,  by = "year") |>
+      dplyr::full_join(focus_co2_sum, by = "year") |>
+      dplyr::full_join(focus_gdp_sum, by = "year") |>
+      dplyr::full_join(focus_en_sum,  by = "year") |>
+      dplyr::mutate(
+        CO2_RESID    = CO2_WORLD    - CO2_FOCUS,
+        GDP_RESID    = GDP_WORLD    - GDP_FOCUS,
+        ENERGY_RESID = ENERGY_WORLD - ENERGY_FOCUS,
+        ENERG_INT_RESID = ENERGY_RESID / GDP_RESID
+      ) |>
+      dplyr::select(year, CO2_RESID, GDP_RESID, ENERGY_RESID, ENERG_INT_RESID,
+                    CO2_WORLD, GDP_WORLD, ENERGY_WORLD, CO2_FOCUS, GDP_FOCUS, ENERGY_FOCUS)
 
-    energ_int_row <- en_row |>
-      dplyr::left_join(gdp_row, by = "year") |>
-      dplyr::mutate(ENERG_INT_ROW = ENERGY_ROW / GDP_ROW) |>
-      dplyr::select(year, ENERG_INT_ROW)
-
-    row_pack <- list(
-      co2_row = co2_row,
-      gdp_row = gdp_row,
-      energy_row = en_row,
-      energ_int_row = energ_int_row
-    )
+    # rename residual variables to chosen resid_name (default RESID)
+    resid_pack <- resid_df |>
+      dplyr::rename(
+        !!paste0("CO2_", resid_name) := CO2_RESID,
+        !!paste0("GDP_", resid_name) := GDP_RESID,
+        !!paste0("ENERGY_", resid_name) := ENERGY_RESID,
+        !!paste0("ENERG_INT_", resid_name) := ENERG_INT_RESID
+      )
   }
 
-  # ---- build wide "checks" tables for focus countries (handy for sanity checks) ----
+  # ---- wide checks for focus countries ----
   focus_wide <- function(df, value_col, prefix) {
     df |>
       dplyr::filter(region %in% focus_countries) |>
@@ -118,13 +142,12 @@ prepare_osem_co2_block <- function(
   en_wide  <- focus_wide(energy0, "prim_ener", "ENERGY")
   ei_wide  <- focus_wide(energ_int0, "energ_int", "ENERG_INT")
 
-  # optionally attach ROW columns to the wide checks
-  if (isTRUE(include_row)) {
-    co2_wide <- co2_wide |> dplyr::left_join(row_pack$co2_row, by = "year")
-    gdp_wide <- gdp_wide |> dplyr::left_join(row_pack$gdp_row, by = "year")
-    en_wide  <- en_wide  |> dplyr::left_join(row_pack$energy_row, by = "year")
-    ei_wide  <- ei_wide  |> dplyr::left_join(row_pack$energ_int_row, by = "year")
-  }
+  # also attach world + residual checks
+  world_checks <- list(
+    co2_world = co20  |> dplyr::filter(region == world_code) |> dplyr::select(year, co2) |> dplyr::rename(CO2_WORLD = co2),
+    gdp_world = gdp0  |> dplyr::filter(region == world_code) |> dplyr::select(year, gdp) |> dplyr::rename(GDP_WORLD = gdp),
+    en_world  = energy0 |> dplyr::filter(region == world_code) |> dplyr::select(year, prim_ener) |> dplyr::rename(ENERGY_WORLD = prim_ener)
+  )
 
   # ---- long local_data for {osem}: time | na_item | values ----
   mk_long <- function(df, value_col, prefix) {
@@ -143,24 +166,28 @@ prepare_osem_co2_block <- function(
     mk_long(energ_int0, "energ_int", "ENERG_INT")
   )
 
-  if (isTRUE(include_row)) {
+  # add residual block as additional "local" series
+  if (isTRUE(include_resid)) {
     local_data <- dplyr::bind_rows(
       local_data,
-      row_pack$co2_row       |> dplyr::transmute(time = make_time(year), na_item = "CO2_ROW",       values = CO2_ROW),
-      row_pack$gdp_row       |> dplyr::transmute(time = make_time(year), na_item = "GDP_ROW",       values = GDP_ROW),
-      row_pack$energy_row    |> dplyr::transmute(time = make_time(year), na_item = "ENERGY_ROW",    values = ENERGY_ROW),
-      row_pack$energ_int_row |> dplyr::transmute(time = make_time(year), na_item = "ENERG_INT_ROW", values = ENERG_INT_ROW)
+      resid_pack |>
+        dplyr::transmute(time = make_time(year), na_item = paste0("CO2_", resid_name), values = .data[[paste0("CO2_", resid_name)]]),
+      resid_pack |>
+        dplyr::transmute(time = make_time(year), na_item = paste0("GDP_", resid_name), values = .data[[paste0("GDP_", resid_name)]]),
+      resid_pack |>
+        dplyr::transmute(time = make_time(year), na_item = paste0("ENERGY_", resid_name), values = .data[[paste0("ENERGY_", resid_name)]]),
+      resid_pack |>
+        dplyr::transmute(time = make_time(year), na_item = paste0("ENERG_INT_", resid_name), values = .data[[paste0("ENERG_INT_", resid_name)]])
     )
   }
 
-  # Optional tiny epsilon for zeros if user wants it (off by default)
+  # Optional epsilon for zeros
   if (is.numeric(log_safe_eps) && log_safe_eps > 0) {
     local_data <- local_data |>
       dplyr::mutate(values = dplyr::if_else(values == 0, log_safe_eps, values))
   }
 
-  # ---- build OSEM specification ----
-  # CO2_<c> = GDP_<c> + ENERGY_<c> + ENERG_INT_<c>
+  # ---- OSEM specification ----
   spec_rows <- lapply(focus_countries, function(cc) {
     data.frame(
       type = "n",
@@ -171,16 +198,17 @@ prepare_osem_co2_block <- function(
   })
   specification <- dplyr::bind_rows(spec_rows)
 
-  if (isTRUE(include_row)) {
+  if (isTRUE(include_resid)) {
     specification <- dplyr::bind_rows(
       specification,
       dplyr::tibble(
         type = "n",
-        dependent = "CO2_ROW",
-        independent = "GDP_ROW + ENERGY_ROW + ENERG_INT_ROW"
+        dependent = paste0("CO2_", resid_name),
+        independent = paste0("GDP_", resid_name, " + ENERGY_", resid_name, " + ENERG_INT_", resid_name)
       )
     )
-    total_rhs <- paste(c(paste0("CO2_", focus_countries), "CO2_ROW"), collapse = " + ")
+
+    total_rhs <- paste(c(paste0("CO2_", focus_countries), paste0("CO2_", resid_name)), collapse = " + ")
   } else {
     total_rhs <- paste(paste0("CO2_", focus_countries), collapse = " + ")
   }
@@ -190,17 +218,14 @@ prepare_osem_co2_block <- function(
     dplyr::tibble(type = "d", dependent = "CO2_TOTAL", independent = total_rhs)
   )
 
-  # ---- dictionary (local-only) ----
-  all_vars <- unique(c(
-    specification$dependent,
-    unlist(strsplit(specification$independent, "\\s*\\+\\s*"))
-  ))
-  all_vars <- trimws(all_vars)
+  # ---- dictionary (local-only, using your schema) ----
+  rhs_vars <- unlist(strsplit(paste(specification$independent, collapse = " + "), "\\s*\\+\\s*"))
+  all_vars <- unique(c(specification$dependent, trimws(rhs_vars)))
   all_vars <- all_vars[all_vars != ""]
   dictionary <- dplyr::tibble(
     model_varname = all_vars,
     database = dplyr::if_else(all_vars == "CO2_TOTAL", NA, "local"),
-    full_name = NA,
+    full_name = NA_character_,
     dataset_id = "local",
     freq = "A"
   )
@@ -210,10 +235,14 @@ prepare_osem_co2_block <- function(
     specification = specification,
     dictionary = dictionary,
     wide_checks = list(
-      co2 = co2_wide,
-      gdp = gdp_wide,
-      energy = en_wide,
-      energ_int = ei_wide
+      focus = list(
+        co2 = co2_wide,
+        gdp = gdp_wide,
+        energy = en_wide,
+        energ_int = ei_wide
+      ),
+      world = world_checks,
+      resid = resid_pack
     )
   )
 }

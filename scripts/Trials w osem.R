@@ -1,5 +1,6 @@
 library(conflicted)
 library(tidyverse)
+#devtools::install_github("moritzpschwarz/osem@extensions")
 library(osem)
 conflicted::conflicts_prefer(dplyr::filter)
 
@@ -15,57 +16,9 @@ gdp_raw <- read_csv("data/processed/wdi_gdp.csv") %>%
 energy_raw <- read_csv("data/processed/primary_energy.csv") %>%
   pivot_longer(cols = -c(region, region_name, variable,unit), names_to = "year", values_to = "prim_ener", names_transform = as.numeric)
 
-
-remove_from_ROW <- c("Africa Eastern and Southern",
-                     "Africa Western and Central", "Arab World",
-                     "Central Europe and the Baltics", "Caribbean small states",
-                     "East Asia & Pacific (excluding high income)",
-                     "Early-demographic dividend", "East Asia & Pacific", "Europe & Central Asia (excluding high income)",
-                     "Europe & Central Asia", "Euro area",
-                     "European Union", "Fragile and conflict affected situations", "High income",
-                     "Heavily indebted poor countries (HIPC)",
-                     "IBRD only", "IDA & IBRD total",
-                     "IDA total", "IDA blend", "IDA only", "Not classified",
-                     "Latin America & Caribbean (excluding high income)", "Latin America & Caribbean",
-                     "Least developed countries: UN classification", "Low income",
-                     "Lower middle income", "Low & middle income",
-                     "Late-demographic dividend","Middle East, North Africa, Afghanistan & Pakistan",
-                     "Middle income", "Middle East, North Africa, Afghanistan & Pakistan (excluding high income)",
-                     "North America", "OECD members", "Other small states", "Pre-demographic dividend",
-                     "Pacific island small states",
-                     "Post-demographic dividend", "Sub-Saharan Africa (excluding high income)",
-                     "Sub-Saharan Africa", "Small states", "East Asia & Pacific (IDA & IBRD countries)",
-                     "Europe & Central Asia (IDA & IBRD countries)",
-                     "Latin America & the Caribbean (IDA & IBRD countries)",
-                     "Middle East, North Africa, Afghanistan & Pakistan (IDA & IBRD)",
-                     "South Asia (IDA & IBRD)", "Sub-Saharan Africa (IDA & IBRD countries)",
-                     "Upper middle income", "World")
-
-remove_from_ROW_code <- read_delim("data/raw/WorldBank_GDP.csv", skip = 3, delim = ",") %>%
-  filter(`Country Name` %in% remove_from_ROW) %>%
-  pull(`Country Code`)
-
-
-# Remove aggregates -------------------------------------------------------
-
-energy <- energy_raw %>%
-  filter(!region %in% remove_from_ROW_code) %>%
-  filter(!region_name %in% remove_from_ROW)
-
-gdp <- gdp_raw %>%
-  filter(!region %in% remove_from_ROW_code) %>%
-  filter(!region_name %in% remove_from_ROW)
-
-co2 <- co2_raw %>%
-  filter(!region %in% remove_from_ROW_code) %>%
-  filter(!region_name %in% remove_from_ROW)
-
-
-
 # Plot data ---------------------------------------------------------------
 
-
-energy %>%
+energy_raw %>%
   ggplot(aes(x = year, y = prim_ener, color = region_name)) +
   geom_line(linewidth = 1) +
   labs(x = "Year",
@@ -74,7 +27,7 @@ energy %>%
   theme(legend.position = "none")
 
 
-gdp %>%
+gdp_raw %>%
   ggplot(aes(x = year, y = gdp, color = region_name)) +
   geom_line(linewidth = 1) +
   labs(x = "Year",
@@ -83,7 +36,7 @@ gdp %>%
   theme(legend.position = "none")
 
 
-co2 %>%
+co2_raw %>%
   ggplot(aes(x = year, y = co2, color = region_name)) +
   geom_line(linewidth = 1) +
   labs(x = "Year",
@@ -94,26 +47,31 @@ co2 %>%
 
 # OSEM --------------------------------------------------------------------
 
+osem_prep <- prepare_osem_co2_block(energy = energy_raw,
+                                    gdp = gdp_raw, co2 = co2_raw,
+                                    focus_countries = c("DEU", "CHN", "USA"))
 
-osem_prep <- prepare_osem_co2_block(energy,
-                                    gdp = gdp, co2 = co2,
-                                    focus_countries = c("DEU", "CHN", "USA"), )
+
 
 model <- run_model(
   specification = osem_prep$specification,
-  input = osem_prep$local_data,
+  input = osem_prep$local_data %>%
+    mutate(values = case_when(na_item == "CO2_CHN" & time == as.Date("1899-01-01") ~ NA,
+                              TRUE ~ values)),
   dictionary = osem_prep$dictionary,
   max.ar = 2,
   trend = TRUE,
   use_logs = "both",
   saturation = c("TIS","IIS", "SIS"),
-  saturation.tpval = 0.001
+  saturation.tpval = 0.001,
+  constrain.to.minimum.sample = FALSE
 )
 
 fcst_mod <- forecast_model(model,n.ahead = 5)
 
 forecast_model(model,n.ahead = 5, exog_fill_method = "ets")
 
+fcst_insample <- forecast_insample(model, exog_fill_method = "ets", sample_share = 0.7)
+plot(fcst_insample, first_date_insample_model = "2000-01-01")
 
-
-
+save(fcst_insample, file = "data/processed/osem_fcst_insample.rda")
