@@ -96,6 +96,18 @@ class EmissionsPeakTest:
         self.trend: Optional[pd.Series] = None
         self.trend_info: Optional[Dict] = None
 
+    def __getstate__(self) -> Dict:
+        """Drop the unpicklable closure before serialisation."""
+        state = self.__dict__.copy()
+        state["noise_generator"] = None
+        return state
+
+    def __setstate__(self, state: Dict) -> None:
+        """Restore state and rebuild the noise generator from saved params."""
+        self.__dict__.update(state)
+        if self.autocorr_params is not None:
+            self.create_noise_generator()
+
     # =================================
     # A) Loading data
     # =================================
@@ -270,8 +282,7 @@ class EmissionsPeakTest:
 
 
         if ignore_years:
-            hist_data.loc[hist_data.year.isin(ignore_years), 'emissions'] = np.nan
-            hist_data['emissions'] = hist_data['emissions'].interpolate()
+            hist_data = hist_data.loc[~hist_data.year.isin(ignore_years)]
 
         years = hist_data["year"].values
         emissions = hist_data["emissions"].values
@@ -719,18 +730,17 @@ class EmissionsPeakTest:
                 size: int, initial_value: float | None = 0
             ) -> np.ndarray:
                 """Generate AR(1) autocorrelated noise."""
-                if noise_type not in ["normal", "t-dist", "empirical"]:
-                    raise ValueError(
-                        "enter method for adding noise ('normal', 't-dist' or 'empirical'"
-                    )
                 if noise_type == "normal":
                     innovations = np.random.normal(0, sigma, size)
                 elif noise_type == "t-dist":
-                    # fit t distribution to residuals
                     df_fitted = self.autocorr_params["t_df_fitted"]
                     innovations = np.random.standard_t(df_fitted, size) * sigma
                 elif noise_type == "empirical":
                     innovations = np.random.choice(residuals_post_ar, size)
+                else:
+                    raise ValueError(
+                        "noise_type must be 'normal', 't-dist' or 'empirical'"
+                    )
 
                 series = np.zeros(size)
                 if initial_value is None:
