@@ -833,7 +833,9 @@ class EmissionsPeakTest:
         n_bootstrap: int = 10000,
         null_hypothesis: str | float | int = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
-        n_years_for_trend: int = 5
+        n_years_for_trend: int = 5,
+        # test_method: str = "slope" # or 'sequential' # currently both options run
+        
     ) -> Dict:
         """
         Run complete bootstrap test with all enhancements.
@@ -847,6 +849,7 @@ class EmissionsPeakTest:
                 - float: Give a specific trend to test if new data is consistent with
             bootstrap_method: "ar_bootstrap", "white_noise"
             n_years_for_trend: int (number of years used to calculate recent trend)
+            test_method: "sequential" (default) or "slope". Whether to use the sequential test 
         """
         if self.noise_generator is None:
             self.create_noise_generator()
@@ -873,8 +876,22 @@ class EmissionsPeakTest:
         bootstrap_slopes = self._generate_bootstrap_slopes(
             n_bootstrap, null_hypothesis, bootstrap_method
         )
+        
+        self.bootstrap_results = {
+            "test_slope": self.test_slope,
+            "test_r2": self.test_r2,
+            "recent_historical_trend": self.recent_historical_trend,
+            "bootstrap_slopes": bootstrap_slopes,
+            "null_hypothesis": null_hypothesis,
+            "bootstrap_method": bootstrap_method,
+            "n_bootstrap": n_bootstrap,
+            "autocorr_phi": self.autocorr_params["phi"],
+            # 'n_segments': len(self.optimal_segments['best']['segments'])
+        }
 
+        # if test_method == 'slope':
         # Calculate p-values
+        print("using slope-based test method")
         p_value_one_tail = np.sum(bootstrap_slopes <= self.test_slope) / len(
             bootstrap_slopes
         )
@@ -883,32 +900,35 @@ class EmissionsPeakTest:
         null_mean = np.mean(bootstrap_slopes)
         null_std = np.std(bootstrap_slopes)
         effect_size = (null_mean - self.test_slope) / null_std if null_std > 0 else 0
-
-        self.bootstrap_results = {
-            "test_slope": self.test_slope,
-            "test_r2": self.test_r2,
-            "recent_historical_trend": self.recent_historical_trend,
-            "bootstrap_slopes": bootstrap_slopes,
+        
+        self.bootstrap_results.update({
             "p_value_one_tail": p_value_one_tail,
             "significant_at_0.1": p_value_one_tail < 0.1,
             "significant_at_0.05": p_value_one_tail < 0.05,
             "significant_at_0.01": p_value_one_tail < 0.01,
-            "null_hypothesis": null_hypothesis,
-            "bootstrap_method": bootstrap_method,
             "effect_size": effect_size,
             "null_mean": null_mean,
             "null_std": null_std,
-            "n_bootstrap": n_bootstrap,
-            "autocorr_phi": self.autocorr_params["phi"],
-            # 'n_segments': len(self.optimal_segments['best']['segments'])
-        }
+        })
+        
+        #### NEW: Sequential test method
+    #if test_method == 'sequential':
+        p_flat, av_p_step = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
+        decline_score = 1 - p_flat
+
+        self.bootstrap_results.update({
+            "p_flat_sequential": p_flat,
+            "decline_score": decline_score,
+            "p_flat_sequential_averaged": av_p_step,
+        })
 
         print(f"Results:")
-        print(f"  P-value: {p_value_one_tail:.4f}")
+        print(f"  P-value slope method: {p_value_one_tail:.4f}")
         print(
             f"  Significant at α=0.1: {self.bootstrap_results['significant_at_0.1']}"
         )
         print(f"  Effect size: {effect_size:.2f} standard deviations")
+        print(f"  P-value sequential method: {p_flat:.4f}")
 
         return
 
@@ -968,6 +988,70 @@ class EmissionsPeakTest:
             bootstrap_slopes.append(model.coef_[0])
 
         return np.array(bootstrap_slopes)
+    
+    # NEW function to calculate sequential p-flat
+    def _compute_sequential_p_flat(self, n_bootstrap: int,
+                                   null_hypothesis: str | float = "zero_trend") -> float:
+        """Compute p_flat using sequential conditional probabilities."""
+
+        obs = self.test_data.emissions.values
+        n_steps = len(obs) - 1
+
+        p_flat = 1.0
+        log_p_flat = 0.0
+        p_steps_list = [] # store p_step for each step
+
+        # Null hypothesis trend
+        if null_hypothesis == "recent_trend":
+            null_trend = self.recent_historical_trend
+        elif isinstance(null_hypothesis, (int,float)):
+            null_trend = null_hypothesis
+        elif null_hypothesis == "2pc_decline":
+            null_trend = -0.02 * baseline_emissions
+        elif null_hypothesis == "3pc_decline":
+            null_trend = -0.03 * baseline_emissions
+        else:  # zero_trend
+            null_trend = 0.0
+
+        for t in range(n_steps):
+
+            y_prev = obs[t]
+            y_next_obs = obs[t + 1]
+
+            sims = []
+            null_emissions_next = y_prev + null_trend  # expected next value under null hypothesis, given previous observed value and null trend
+
+            for _ in range(n_bootstrap):
+
+                # generate ONE step of noise
+                if (
+                    self.autocorr_params["has_autocorr"]
+                    and self.autocorr_params["is_stationary"]
+                ):
+                    noise = self.noise_generator(1, initial_value=None)[0]
+                else:
+                    noise = self.noise_generator(1)[0]
+
+                # AR(1) step (adapt if your exact form differs)
+                y_next_sim = null_emissions_next + self.autocorr_params["phi"] * (y_prev - null_emissions_next) + noise  # null trend + autocorrelation from previous step + noise)
+
+                sims.append(y_next_sim)
+
+            sims = np.array(sims)
+
+            # probability of being at least as low as observed
+            p_step = np.mean(sims <= y_next_obs)
+            p_steps_list.append(p_step)
+            print(f"Step {t+1}/{n_steps}: P(simulated ≤ observed) = {p_step:.4f}")
+            log_p_flat += np.log(p_step + 1e-10)  # add small value to avoid log(0)
+
+            # accumulate sequentially
+            # p_flat *= p_step
+            p_flat = np.exp(log_p_flat) # Use log probabilities to increase stability for long sequences
+            av_p_step = np.mean(p_steps_list)
+
+        return p_flat, av_p_step
+    
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
@@ -1397,8 +1481,8 @@ if __name__ == "__main__":
     peak_test.set_test_data(
         [
             (2025, 37700),
-            (2026, 37400),
-            (2027, 37100),
+            (2026, 37400), #37400
+            (2027, 37100), # 37100
             # (2028, 37400)
         ]
     )
@@ -1406,6 +1490,9 @@ if __name__ == "__main__":
     peak_test.create_noise_generator()
     peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
+    print(f"P-value (one-tail): {peak_test.bootstrap_results['p_value_one_tail']:.4f}")
+    print(f"P-value (sequential): {peak_test.bootstrap_results['p_flat_sequential']:.4f}")  
+    print(f"P-value (sequential, averaged): {peak_test.bootstrap_results['p_flat_sequential_averaged']:.4f}") 
     # Get interpretation
     interpretation = peak_test.interpret_results(verbose=True)
 
