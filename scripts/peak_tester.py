@@ -996,6 +996,7 @@ class EmissionsPeakTest:
 
         obs = self.test_data.emissions.values
         n_steps = len(obs) - 1
+        start_value = obs[0]
 
         p_flat = 1.0
         log_p_flat = 0.0
@@ -1019,8 +1020,8 @@ class EmissionsPeakTest:
             y_next_obs = obs[t + 1]
 
             sims = []
-            null_emissions_next = y_prev + null_trend  # expected next value under null hypothesis, given previous observed value and null trend
-
+            null_emissions_next = start_value + null_trend*(t+1)  # expected next value under null hypothesis, given starting value and null trend
+            null_emissions_prev = start_value + null_trend*t if t > 0 else start_value  # expected previous value under null hypothesis, given starting value and null trend
             for _ in range(n_bootstrap):
 
                 # generate ONE step of noise
@@ -1033,7 +1034,8 @@ class EmissionsPeakTest:
                     noise = self.noise_generator(1)[0]
 
                 # AR(1) step (adapt if your exact form differs)
-                y_next_sim = null_emissions_next + self.autocorr_params["phi"] * (y_prev - null_emissions_next) + noise  # null trend + autocorrelation from previous step + noise)
+                residual_prev = y_prev - null_emissions_prev if t > 0 else 0  # innovation from previous step (0 for the first step)
+                y_next_sim = null_emissions_next + self.autocorr_params["phi"] * (residual_prev) + noise  # null trend + autocorrelation from previous step + noise)
 
                 sims.append(y_next_sim)
 
