@@ -913,13 +913,12 @@ class EmissionsPeakTest:
         
         #### NEW: Sequential test method
     #if test_method == 'sequential':
-        p_flat, av_p_step = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
-        decline_score = 1 - p_flat
+        p_flat, av_p_step, p_steps_list = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
 
         self.bootstrap_results.update({
-            "p_flat_sequential": p_flat,
-            "decline_score": decline_score,
-            "p_flat_sequential_averaged": av_p_step,
+            "p_sequential_multiplied": p_flat,
+            "p_sequential_averaged": av_p_step,
+            "p_sequential_steps": p_steps_list,
         })
 
         print(f"Results:")
@@ -1052,7 +1051,7 @@ class EmissionsPeakTest:
             p_flat = np.exp(log_p_flat) # Use log probabilities to increase stability for long sequences
             av_p_step = np.mean(p_steps_list)
 
-        return p_flat, av_p_step
+        return p_flat, av_p_step, p_steps_list
     
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
@@ -1493,8 +1492,8 @@ if __name__ == "__main__":
     peak_test.run_complete_bootstrap_test(bootstrap_method="ar_bootstrap")
 
     print(f"P-value (one-tail): {peak_test.bootstrap_results['p_value_one_tail']:.4f}")
-    print(f"P-value (sequential): {peak_test.bootstrap_results['p_flat_sequential']:.4f}")  
-    print(f"P-value (sequential, averaged): {peak_test.bootstrap_results['p_flat_sequential_averaged']:.4f}") 
+    print(f"P-value (sequential): {peak_test.bootstrap_results['p_sequential_averaged']:.4f}")  
+    print(f"P-value (sequential, list): {peak_test.bootstrap_results['p_sequential_steps']}") 
     # Get interpretation
     interpretation = peak_test.interpret_results(verbose=True)
 
