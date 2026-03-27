@@ -39,8 +39,13 @@ fossil_co2.to_csv("data/processed/gcb_hist_co2.csv")
 gdp = pd.read_csv("data/raw/WorldBank_GDP.csv", skiprows=4, index_col=[0, 1, 2, 3])
 gdp.index.names = ["region_name", "region", "variable", "id"]
 gdp = gdp.droplevel(["region_name", "id"])
+
+#Standardise to Fossil CO2 regions and names
+gdp = gdp.loc[isin(region=fossil_co2.pix.project('region').index)]
 gdp = gdp.pix.assign(
-    region_name=[iso_to_name(iso) for iso in gdp.pix.project("region").index],
+    region_name=(
+        gdp.pix.project('region').index
+        .map(dict(fossil_co2.pix.project(['region','region_name']).index))),
     variable="GDP",
     unit="trillion USD2015",
 )/1e12
@@ -63,6 +68,13 @@ pe = pe.pix.assign(
     region=[name_to_iso(r) for r in pe.pix.project("region_name").index],
     variable='Primary Energy',
     unit = 'EJ / yr'
+)
+#Standardise to Fossil CO2 regions and names
+pe = pe.loc[isin(region=fossil_co2.pix.project('region').index)]
+pe = pe.pix.assign(
+    region_name = (
+        pe.pix.project('region').index
+        .map(dict(fossil_co2.pix.project(['region','region_name']).index))),
 )
 pe = pe.reorder_levels(IX_ORDER)
 pe.columns = pe.columns.astype(int)
