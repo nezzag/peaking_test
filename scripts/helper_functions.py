@@ -5,13 +5,18 @@ import os
 import sys
 
 class HiddenPrints:
+    def __init__(self, suppress=True):
+        self.suppress = suppress
+
     def __enter__(self):
-        self._original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+        if self.suppress:
+            self._original_stdout = sys.stdout
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8')
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.close()
-        sys.stdout = self._original_stdout
+        if self.suppress:
+            sys.stdout.close()
+            sys.stdout = self._original_stdout
 
 
 # Converting ISO Alpha-3 to ISO international names
@@ -125,3 +130,40 @@ def name_to_iso(name):
         return name
     else:
         return pycountry.countries.get(name=name).alpha_3
+
+
+def segment_by_peaks(data, value_col="emissions", year_col="year"):
+    """
+    Return the index values (e.g. years) where a new all-time peak is reached,
+    marking the start of each fresh segment.
+
+    The first index value is always included. Each subsequent value that
+    exceeds every previous value is also included.
+
+    Args:
+        data: pd.Series (values, with any index) or pd.DataFrame with
+              year as index or as a column (year_col) and emissions as value_col.
+        value_col: column name for the values when data is a DataFrame.
+        year_col: column name for years when data is a DataFrame with year as a column.
+
+    Returns:
+        List of index values (e.g. years) where a new segment starts.
+    """
+    import pandas as pd
+
+    if isinstance(data, pd.DataFrame):
+        if year_col in data.columns:
+            data = data.sort_values(year_col).set_index(year_col)[value_col]
+        else:
+            data = data.sort_index()[value_col]
+
+    segment_starts = [data.index[0]]
+    running_max = data.iloc[0]
+
+    for i in range(1, len(data)):
+        val = data.iloc[i]
+        if val > running_max:
+            running_max = val
+            segment_starts.append(data.index[i])
+
+    return segment_starts

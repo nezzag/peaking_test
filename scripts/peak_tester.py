@@ -38,7 +38,7 @@ Authors: Neil Grant and Claire Fyson
 
 from pathlib import Path
 import warnings
-from typing import List, Tuple, Dict, Optional, Callable, Union
+from typing import Tuple, Dict, Optional, Callable, Union
 import numpy as np
 import pandas as pd
 from pandas_indexing import isin
@@ -167,23 +167,24 @@ class EmissionsPeakTest:
         data.columns = data.columns.astype(int)
         data = pd.Series(index=data.columns, data=data.values.squeeze()).reset_index()
         data.columns = ["year", "emissions"]
+        data = data.set_index("year")
 
         # Filter to the selected years
-        self.historical_data = data.loc[data["year"].isin(year_range)]
+        self.historical_data = data.loc[data.index.isin(year_range)]
 
         # Validate data
         self._validate_historical_data()
 
         # calculate recent trend (excluding most recent year)
         recent_data = self.historical_data.tail(5)
-        X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
+        X_recent = recent_data.index.values.reshape(-1, 1) # extract years for regression
         y_recent = recent_data["emissions"].values
         model_recent = LinearRegression()
         model_recent.fit(X_recent, y_recent)
         self.recent_historical_trend = model_recent.coef_[0]
 
         print(
-            f"Loaded historical data: {self.historical_data['year'].min()}-{self.historical_data['year'].max()}"
+            f"Loaded historical data: {self.historical_data.index.min()}-{self.historical_data.index.max()}"
         )
         print(f"Data points: {len(self.historical_data)}")
         
@@ -282,9 +283,9 @@ class EmissionsPeakTest:
 
 
         if ignore_years:
-            hist_data = hist_data.loc[~hist_data.year.isin(ignore_years)]
+            hist_data = hist_data.loc[~hist_data.index.isin(ignore_years)]
 
-        years = hist_data["year"].values
+        years = hist_data.index.values
         emissions = hist_data["emissions"].values
 
         if method == "lowess":
@@ -317,11 +318,11 @@ class EmissionsPeakTest:
             hist_data["emissions_lag"] = hist_data["emissions"].shift(1)
 
             # Drop rows with NaN values (first 'lag' rows will have NaN)
-            hist_data = hist_data.dropna().reset_index(drop=True)
+            hist_data = hist_data.dropna()
 
             # Prepare features (X) and target (y)
-            feature_cols = ["year"] + ["emissions_lag"]
-            X = hist_data[feature_cols]
+            feature_cols = ["emissions_lag"]
+            X = hist_data[feature_cols].assign(year=hist_data.index)
             y = hist_data["emissions"]
 
             # Fit the linear regression model
@@ -790,27 +791,34 @@ class EmissionsPeakTest:
         return self.noise_generator
 
     def set_test_data(
-        self, test_data: List[Tuple[int, float]]) -> "EmissionsPeakTest":
+        self, test_data: Union[pd.Series, pd.DataFrame]) -> "EmissionsPeakTest":
         """
         Set the test data (recent emissions showing potential decline).
 
         Args:
-            test_data: List of (year, emissions) tuples
+            test_data: Either a pd.Series with year as index and emissions as values,
+                       or a pd.DataFrame with year as index and an "emissions" column.
 
         Returns:
             Self for method chaining
         """
 
-        self.test_data = pd.DataFrame(test_data, columns=["year", "emissions"])
-        self.test_data = self.test_data.sort_values("year").reset_index(drop=True)
+        if isinstance(test_data, pd.Series):
+            self.test_data = test_data.rename("emissions").to_frame().sort_index()
+            self.test_data.index.name = "year"
+        elif isinstance(test_data, pd.DataFrame):
+            self.test_data = test_data.sort_index()
+        else:
+            raise ValueError("test_data must be either a DataFrame or Series")
 
-        self.emissions_data = pd.concat([self.historical_data, self.test_data], ignore_index=True).drop_duplicates()
+        self.emissions_data = pd.concat([self.historical_data, self.test_data])
+        self.emissions_data = self.emissions_data[~self.emissions_data.index.duplicated(keep="last")]
 
         # Calculate test trend
         self.test_slope, self.test_r2 = self._calculate_test_slope()
 
         print(
-            f"Test data set: {self.test_data['year'].min()}-{self.test_data['year'].max()}"
+            f"Test data set: {self.test_data.index.min()}-{self.test_data.index.max()}"
         )
         print(
             f"Test slope: {self.test_slope:.2f} {self.unit} (R² = {self.test_r2:.3f})"
@@ -820,7 +828,7 @@ class EmissionsPeakTest:
 
     def _calculate_test_slope(self) -> Tuple[float, float]:
         """Calculate slope and R² for test data."""
-        X = self.test_data["year"].values.reshape(-1, 1)
+        X = self.test_data.index.values.reshape(-1, 1)
         y = self.test_data["emissions"].values
 
         model = LinearRegression()
@@ -834,7 +842,7 @@ class EmissionsPeakTest:
         null_hypothesis: str | float | int = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
         n_years_for_trend: int = 5,
-        # test_method: str = "slope" # or 'sequential' # currently both options run
+        test_sequential: bool = False, 
         
     ) -> Dict:
         """
@@ -849,7 +857,7 @@ class EmissionsPeakTest:
                 - float: Give a specific trend to test if new data is consistent with
             bootstrap_method: "ar_bootstrap", "white_noise"
             n_years_for_trend: int (number of years used to calculate recent trend)
-            test_method: "sequential" (default) or "slope". Whether to use the sequential test 
+            test_sequential: False (default). Whether to calculate the sequential test 
         """
         if self.noise_generator is None:
             self.create_noise_generator()
@@ -866,7 +874,7 @@ class EmissionsPeakTest:
 
         if n_years_for_trend != 5:
             recent_data = self.historical_data.tail(n_years_for_trend) # Exclude most recent year to avoid overlap with test data
-            X_recent = recent_data["year"].values.reshape(-1, 1) # extract years for regression
+            X_recent = recent_data.index.values.reshape(-1, 1) # extract years for regression
             y_recent = recent_data["emissions"].values
             model_recent = LinearRegression()
             model_recent.fit(X_recent, y_recent)
@@ -889,7 +897,6 @@ class EmissionsPeakTest:
             # 'n_segments': len(self.optimal_segments['best']['segments'])
         }
 
-        # if test_method == 'slope':
         # Calculate p-values
         print("using slope-based test method")
         p_value_one_tail = np.sum(bootstrap_slopes <= self.test_slope) / len(
@@ -911,23 +918,27 @@ class EmissionsPeakTest:
             "null_std": null_std,
         })
         
+        if test_sequential:
         #### NEW: Sequential test method
-    #if test_method == 'sequential':
-        p_flat, av_p_step, p_steps_list = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
+            p_flat, av_p_step, p_steps_list = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
 
-        self.bootstrap_results.update({
-            "p_sequential_multiplied": p_flat,
-            "p_sequential_averaged": av_p_step,
-            "p_sequential_steps": p_steps_list,
-        })
+            self.bootstrap_results.update({
+                "p_sequential_multiplied": p_flat,
+                "p_sequential_averaged": av_p_step,
+                "p_sequential_steps": p_steps_list,
+            })
 
-        print(f"Results:")
-        print(f"  P-value slope method: {p_value_one_tail:.4f}")
-        print(
-            f"  Significant at α=0.1: {self.bootstrap_results['significant_at_0.1']}"
-        )
-        print(f"  Effect size: {effect_size:.2f} standard deviations")
-        print(f"  P-value sequential method: {p_flat:.4f}")
+
+            print("Results:")
+            print(f"  P-value sequential method: {p_flat:.4f}")
+
+        else:
+            # Just print the slope-based method otherwise
+            print(f"  P-value slope method: {p_value_one_tail:.4f}")
+            print(
+                f"  Significant at α=0.1: {self.bootstrap_results['significant_at_0.1']}"
+            )
+            print(f"  Effect size: {effect_size:.2f} standard deviations")
 
         return
 
@@ -938,11 +949,11 @@ class EmissionsPeakTest:
         bootstrap_slopes = []
         n_test_points = len(self.test_data)
 
-        years = self.test_data.year.values  # Arbitrary years for test
+        years = self.test_data.index.values  # Arbitrary years for test
 
         # Baseline emissions level
-        baseline_emissions = self.test_data.emissions[0]
-        baseline_year = self.test_data.year[0]
+        baseline_emissions = self.test_data["emissions"].iloc[0]
+        baseline_year = self.test_data.index[0]
 
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
@@ -993,13 +1004,14 @@ class EmissionsPeakTest:
                                    null_hypothesis: str | float = "zero_trend") -> float:
         """Compute p_flat using sequential conditional probabilities."""
 
-        obs = self.test_data.emissions.values
+        obs = self.test_data["emissions"].values
+        years = self.test_data.index.values
         n_steps = len(obs) - 1
         start_value = obs[0]
 
         p_flat = 1.0
         log_p_flat = 0.0
-        p_steps_list = [] # store p_step for each step
+        p_steps_dict = {}  # store p_step for each step, keyed by year
 
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
@@ -1042,16 +1054,19 @@ class EmissionsPeakTest:
 
             # probability of being at least as low as observed
             p_step = np.mean(sims <= y_next_obs)
-            p_steps_list.append(p_step)
+            p_steps_dict[years[t + 1]] = p_step
             print(f"Step {t+1}/{n_steps}: P(simulated ≤ observed) = {p_step:.4f}")
             log_p_flat += np.log(p_step + 1e-10)  # add small value to avoid log(0)
 
             # accumulate sequentially
             # p_flat *= p_step
             p_flat = np.exp(log_p_flat) # Use log probabilities to increase stability for long sequences
-            av_p_step = np.mean(p_steps_list)
 
-        return p_flat, av_p_step, p_steps_list
+        p_steps_series = pd.Series(p_steps_dict, name="p_step")
+        p_steps_series.index.name = "year"
+        av_p_step = p_steps_series.mean()
+
+        return p_flat, av_p_step, p_steps_series
     
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
@@ -1202,12 +1217,12 @@ class EmissionsPeakTest:
         test_plot_kwargs = {**default_test_kwargs, **(test_kwargs or {})}
 
         ax.plot(
-            self.historical_data["year"],
+            self.historical_data.index,
             self.historical_data["emissions"],
             **hist_plot_kwargs,
         )
         ax.plot(
-            self.test_data["year"],
+            self.test_data.index,
             self.test_data["emissions"],
             **test_plot_kwargs,
         )
@@ -1454,8 +1469,8 @@ class EmissionsPeakTest:
                 self.bootstrap_results["n_bootstrap"],
                 # self.noise_params["sigma"],
                 len(self.test_data),
-                self.test_data["year"].min(),
-                self.test_data["year"].max(),
+                self.test_data.index.min(),
+                self.test_data.index.max(),
             ]
         )
 
