@@ -494,7 +494,7 @@ class EmissionsPeakTest:
 
             trend = pd.Series(index=breakpoints, data=y_breakpoint)
             trend = (
-                trend.reindex(set(years) | set(trend.index)).sort_index().interpolate()
+                trend.reindex(set(years) | set(trend.index)).sort_index().interpolate(method='index')
             )
             trend = trend.reindex(years)
 
