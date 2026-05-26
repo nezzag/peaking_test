@@ -166,7 +166,7 @@ class EmissionsPeakTest:
         # Cast into long-form and rename
         data.columns = data.columns.astype(int)
         data = pd.Series(index=data.columns, data=data.values.squeeze()).reset_index()
-        data.columns = ["year", "emissions"]
+        data.columns = ["year", "emissions"] # TODO: Make this more flexible to allow for different column names
         data = data.set_index("year")
 
         # Filter to the selected years
@@ -1067,7 +1067,6 @@ class EmissionsPeakTest:
         av_p_step = p_steps_series.mean()
 
         return p_flat, av_p_step, p_steps_series
-    
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
