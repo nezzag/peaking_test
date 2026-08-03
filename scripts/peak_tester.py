@@ -86,6 +86,7 @@ class EmissionsPeakTest:
         Initialize the emissions peak test.
         """
         self.region: Optional[str] = None
+        self.variable: Optional[str] = None
         self.historical_data: Optional[pd.DataFrame] = None
         self.emissions_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
@@ -116,6 +117,7 @@ class EmissionsPeakTest:
         self,
         data_source: Union[str, pd.DataFrame],
         region: str = "WLD",
+        variable: str = "Emissions|CO2|Total",
         year_range: range = range(1970, 2025),
     ) -> "EmissionsPeakTest":
         """
@@ -135,6 +137,14 @@ class EmissionsPeakTest:
             except Exception as e:
                 raise ValueError(
                     "No region selected - provide ISO3 code for region of interest"
+                )
+            
+        if self.variable is None:
+            try:
+                self.variable = variable
+            except Exception as e:
+                raise ValueError(
+                    "No variable selected - provide variable of interest"
                 )
 
         if isinstance(data_source, str):
@@ -161,7 +171,8 @@ class EmissionsPeakTest:
             raise ValueError("data_source must be a file path or DataFrame")
 
         data = data.loc[isin(region=self.region)]
-        self.variable = data.pix.unique("variable")[0]
+        data = data.loc[isin(variable=self.variable)]
+        # self.variable = data.pix.unique("variable")[0]
         self.unit = data.pix.unique("unit")[0]
         # Cast into long-form and rename
         data.columns = data.columns.astype(int)
@@ -843,6 +854,7 @@ class EmissionsPeakTest:
         bootstrap_method: str = "ar_bootstrap",
         n_years_for_trend: int = 5,
         test_sequential: bool = False, 
+        store_sequential_sims: bool = False, # choose to store simulations for plotting
         
     ) -> Dict:
         """
@@ -920,12 +932,16 @@ class EmissionsPeakTest:
         
         if test_sequential:
         #### NEW: Sequential test method
-            p_flat, av_p_step, p_steps_list = self._compute_sequential_p_flat(n_bootstrap) # calculate probability of being consistent with a flat trend
+            p_flat, av_p_step, p_steps_list, sims_dict = self._compute_sequential_p_flat(
+                n_bootstrap,
+                store_sims=store_sequential_sims
+                                        ) # calculate probability of being consistent with a flat trend
 
             self.bootstrap_results.update({
                 "p_sequential_multiplied": p_flat,
                 "p_sequential_averaged": av_p_step,
                 "p_sequential_steps": p_steps_list,
+                "simulated_values_dict": sims_dict,
             })
 
 
@@ -1001,17 +1017,38 @@ class EmissionsPeakTest:
     
     # NEW function to calculate sequential p-flat
     def _compute_sequential_p_flat(self, n_bootstrap: int,
-                                   null_hypothesis: str | float = "zero_trend") -> float:
-        """Compute p_flat using sequential conditional probabilities."""
+                                   null_hypothesis: str | float = "zero_trend",
+                                   store_sims = False) -> float:
+        """
+        This method calculates the probability of observing the test data under the null hypothesis by 
+        sequentially evaluating the probability of each step in the test data being as low as observed, 
+        given the previous steps and the null hypothesis. It accounts for autocorrelation in the noise 
+        and allows for different null hypotheses regarding the trend.
+
+        Args:            n_bootstrap: Number of bootstrap simulations to run for each step
+            null_hypothesis: Three options:
+                - "recent_trend" (testing if new data is consistent with recent trend, using n of years defined below)
+                - "zero_trend" (testing if new data is consistent with a zero trend)
+                - "2pc_decline" (testing if new data is consistent with a 2% per year decline)
+                - "3pc_decline" (testing if new data is consistent with a 3% per year decline)
+                - float: Give a specific trend to test if new data is consistent with
+         Returns:            p_flat: Overall probability of observing the test data under the null hypothesis, calculated as the product of the stepwise probabilities
+            av_p_step: Average of the stepwise probabilities (for interpretation)
+            p_steps_series: pd.Series with the stepwise probabilities for each year
+            sims_dict: Dictionary with the simulated distributions for each step, keyed by year
+        
+    
+        """
 
         obs = self.test_data["emissions"].values
         years = self.test_data.index.values
-        n_steps = len(obs) - 1
+        n_steps = len(obs) - 1 
         start_value = obs[0]
 
         p_flat = 1.0
         log_p_flat = 0.0
         p_steps_dict = {}  # store p_step for each step, keyed by year
+        sims_dict = {}  # store simulated distributions for each step, keyed by year
 
         # Null hypothesis trend
         if null_hypothesis == "recent_trend":
@@ -1032,7 +1069,7 @@ class EmissionsPeakTest:
 
             sims = []
             null_emissions_next = start_value + null_trend*(t+1)  # expected next value under null hypothesis, given starting value and null trend
-            null_emissions_prev = start_value + null_trend*t if t > 0 else start_value  # expected previous value under null hypothesis, given starting value and null trend
+            null_emissions_prev = start_value + null_trend*t  # expected previous value under null hypothesis, given starting value and null trend
             for _ in range(n_bootstrap):
 
                 # generate ONE step of noise
@@ -1045,7 +1082,7 @@ class EmissionsPeakTest:
                     noise = self.noise_generator(1)[0]
 
                 # AR(1) step (adapt if your exact form differs)
-                residual_prev = y_prev - null_emissions_prev if t > 0 else 0  # innovation from previous step (0 for the first step)
+                residual_prev = y_prev - null_emissions_prev  # innovation from previous step (will be 0 for the first step)
                 y_next_sim = null_emissions_next + self.autocorr_params["phi"] * (residual_prev) + noise  # null trend + autocorrelation from previous step + noise)
 
                 sims.append(y_next_sim)
@@ -1055,6 +1092,9 @@ class EmissionsPeakTest:
             # probability of being at least as low as observed
             p_step = np.mean(sims <= y_next_obs)
             p_steps_dict[years[t + 1]] = p_step
+            
+            if store_sims:
+                sims_dict[years[t + 1]] = sims  # Store the simulated values for each step
             print(f"Step {t+1}/{n_steps}: P(simulated ≤ observed) = {p_step:.4f}")
             log_p_flat += np.log(p_step + 1e-10)  # add small value to avoid log(0)
 
@@ -1066,7 +1106,7 @@ class EmissionsPeakTest:
         p_steps_series.index.name = "year"
         av_p_step = p_steps_series.mean()
 
-        return p_flat, av_p_step, p_steps_series
+        return p_flat, av_p_step, p_steps_series, sims_dict
 
     def interpret_results(self, verbose: bool = True) -> Dict[str, str]:
         """
