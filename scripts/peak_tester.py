@@ -602,15 +602,21 @@ class EmissionsPeakTest:
         return residuals, trend, trend_info
 
     def _analyze_autocorrelation(
-        self, noise_type: str = "t-dist", t_df: Optional[float] = None
+        self, noise_type: str = "t-dist", t_df: Optional[float] = None,
+        df_normal_threshold: float = 30.0,
     ) -> Dict:
         """
         Analyze autocorrelation in temporally-ordered residuals to check for any remaining structure.
-        
+
         Arguments:
             noise_type: type of noise distribution ('normal', 't-dist', 'empirical')
             t_df: Optional fixed degrees of freedom for t-distribution.
                 If None, will be fitted from data when noise_type = 't-dist'
+            df_normal_threshold: When the t-distribution df is *fitted* (t_df is None)
+                and exceeds this value, the innovations are effectively Gaussian, so
+                the noise type is collapsed to 'normal'. A t-distribution with df above
+                ~30 is numerically indistinguishable from a normal, and stats.t.fit can
+                return astronomically large df because the likelihood is flat as df -> inf.
 
         Returns:
             Self for method chaining
@@ -650,13 +656,23 @@ class EmissionsPeakTest:
             # calculate t-distribution
             if noise_type == "t-dist":
                 if t_df is not None:
-                    # use provided df value
+                    # use provided df value (respected as-is, no collapse)
                     df_fitted = t_df
                 else:
                     df_fitted, loc, scale = stats.t.fit(
                         innovation_residuals
                     )  # these are the innovation residuals (with AC removed)
                     print(f"Fitted t-distribution to innovations: df = {df_fitted:.1f}")
+                    # Above ~30 df a t-distribution is effectively Gaussian; the fitted
+                    # value is meaningless precision (likelihood flat as df -> inf), so
+                    # report 'normal' rather than an astronomically large df.
+                    if df_fitted > df_normal_threshold:
+                        print(
+                            f"  df = {df_fitted:.0f} > {df_normal_threshold:g}: "
+                            "innovations effectively Gaussian — using normal noise."
+                        )
+                        noise_type = "normal"
+                        df_fitted = None
             else:
                 df_fitted = None
 
