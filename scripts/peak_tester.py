@@ -54,6 +54,10 @@ from sklearn.metrics import r2_score, mean_squared_error
 
 warnings.filterwarnings("ignore")
 
+# An AR(1) noise process is used when a lag-1 Ljung-Box test on the residuals has a
+# p-value below this threshold. Imported by compare_methods.py so both make the same choice
+AR1_PVALUE_THRESHOLD = 0.1
+
 # =================================
 # Define Key Class
 # =================================
@@ -325,10 +329,13 @@ class EmissionsPeakTest:
             }
 
         elif method == "linear_w_autocorrelation":
-            # Create lagged variable(s) for autoregressive component
-            hist_data["emissions_lag"] = hist_data["emissions"].shift(1)
+            # Create lagged variable(s) for autoregressive component. Lag by calendar year
+            # (not position) so that a year following an ignored year has no lag, rather
+            # than being lagged on the year before the gap
+            hist_data["emissions_lag"] = hist_data["emissions"].reindex(
+                hist_data.index - 1).values
 
-            # Drop rows with NaN values (first 'lag' rows will have NaN)
+            # Drop rows with NaN values (first year, and any year following an ignored year)
             hist_data = hist_data.dropna()
 
             # Prepare features (X) and target (y)
@@ -348,9 +355,8 @@ class EmissionsPeakTest:
             mse = mean_squared_error(y, y_pred)
             rmse = np.sqrt(mse)
 
-            trend = pd.Series(index=years[1:], data=y_pred)
-            residuals = pd.Series(index=years[1:], data=(y - trend.values).values)
-            year_to_use = years[1:]
+            trend = pd.Series(index=y.index, data=y_pred)
+            residuals = pd.Series(index=y.index, data=(y - trend.values).values)
 
             #TODO: Think about whether enforcing 0 residual for the first year is dangerous
             # trend = trend.reindex(years)
@@ -544,19 +550,23 @@ class EmissionsPeakTest:
             # Build regression matrix
             # Both X and Y are reduced in size by p + h
             # (you can't forecast before p+h: into the data, as you don't have sufficient data)
-            X = np.ones((n - p - h, p))
-            Y = y[p + h :]
-
-            for i in range(p):
-                lag = p - i
-                X[:, i] = y[p + h - lag : n - lag]
+            # Lags are taken by calendar year (not position), so that no regression row
+            # spans an ignored year - those rows are dropped instead
+            full = pd.Series(index=years, data=y).reindex(range(int(years[0]), int(years[-1]) + 1))
+            lagged = pd.concat(
+                [full.rename("Y")] + [full.shift(lag).rename(lag) for lag in range(p, 0, -1)],
+                axis=1,
+            )
+            lagged = lagged.loc[lagged.index >= years[0] + p + h].dropna()
+            X = lagged.drop(columns="Y").values
+            Y = lagged["Y"].values
 
             # Fit regression
             model = OLS(Y, X).fit()
 
             # Extract data
-            residuals = pd.Series(index=years[p + h :], data=model.resid)
-            trend = pd.Series(index=years[p + h :], data=model.fittedvalues)
+            residuals = pd.Series(index=lagged.index, data=model.resid)
+            trend = pd.Series(index=lagged.index, data=model.fittedvalues)
 
             # Fill initial periods (Neil: I removed this as there is no real way to backfill residuals)
             # if max_lag > 0:
@@ -576,7 +586,8 @@ class EmissionsPeakTest:
 
             # Nest decides the number of "knots" in the spline
             # If not provided, we use len(emissions)/3 (so a knot every 3 years)
-            n_knots = kwargs.get("n_knots", int(np.ceil(len(emissions) / 3)))
+            # (at least 8, the minimum for a cubic spline, so short series don't fail)
+            n_knots = kwargs.get("n_knots", max(8, int(np.ceil(len(emissions) / 3))))
 
             s = kwargs.get("s", len(years))
     
@@ -617,17 +628,24 @@ class EmissionsPeakTest:
 
         """
 
-        residuals = self.residuals.values
+        # Reindex to a continuous range of years (NaN for ignored years), so that
+        # lag-1 pairs that span an ignored year are skipped rather than treated as adjacent
+        residuals = self.residuals.sort_index()
+        full = residuals.reindex(
+            range(int(residuals.index.min()), int(residuals.index.max()) + 1))
 
-        # Calculate lag-1 autocorrelation via the acf function, and the probability of autocorrelation
-        acf_values, _, pvalues = acf(residuals, nlags=1, qstat=True, fft=True)
-        phi = acf_values[1] # Ignore AR(0), i.e. no lag applied at all (which will be 1)
-        p_autocorr = pvalues[0]
+        # Calculate lag-1 autocorrelation via the acf function, and the probability of
+        # autocorrelation via a lag-1 Ljung-Box test
+        n = full.notna().sum()
+        phi = acf(full.values, nlags=1, missing="conservative", fft=False)[1] # Ignore AR(0), i.e. no lag applied at all (which will be 1)
+        q_stat = n * (n + 2) * phi**2 / (n - 1)
+        p_autocorr = stats.chi2.sf(q_stat, 1)
 
-        # Simple AR(1) model fitting
-        if len(residuals) > 1:
-            y = residuals[1:]
-            X = residuals[:-1].reshape(-1, 1)
+        # Simple AR(1) model fitting, on consecutive-year pairs only
+        pairs = pd.concat([full.rename("y"), full.shift(1).rename("x")], axis=1).dropna()
+        if len(pairs) > 1:
+            y = pairs["y"].values
+            X = pairs["x"].values.reshape(-1, 1)
 
             ar_model = (
                 LinearRegression()
@@ -666,7 +684,7 @@ class EmissionsPeakTest:
             mean_innovation = np.mean(self.residuals)
 
         self.autocorr_params = {
-            "has_autocorr": p_autocorr < 0.1,
+            "has_autocorr": p_autocorr < AR1_PVALUE_THRESHOLD,
             "phi": phi_fitted,
             "residuals": innovation_residuals,
             "sigma_residuals": sigma_innovation,

@@ -53,13 +53,9 @@ from scipy import stats
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tsa.stattools import acf
 
-from peak_tester import EmissionsPeakTest
+from peak_tester import AR1_PVALUE_THRESHOLD, EmissionsPeakTest
 
 warnings.filterwarnings("ignore")
-
-# An AR(1) noise process is used when a lag-1 Ljung-Box test on the residuals has a
-# p-value below this threshold. Shared with compare_methods.py so both make the same choice
-AR1_PVALUE_THRESHOLD = 0.1
 
 METHODS = [
     "linear",
