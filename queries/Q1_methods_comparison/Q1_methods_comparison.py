@@ -6,7 +6,8 @@ compare_methods always find a decomposition method whose noise passes the diagno
 tests (autocorrelation, ARCH, normality), or are there regions/datasets where every
 method fails?
 
-Method selection uses the priority list (compare_methods.METHOD_PRIORITY), no backtest.
+Method selection uses the priority list (peak_tester.METHOD_PRIORITY), no backtest, via
+EmissionsPeakTest.compare_methods().
 
 Outputs (all numbers computed here):
   Q1_methods_comparison.md     summary, selection table and per-method status grids
@@ -32,8 +33,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from compare_methods import METHODS, METHOD_PRIORITY, compare_methods  # noqa: E402
-from peak_tester import EmissionsPeakTest  # noqa: E402
+from peak_tester import METHODS, METHOD_PRIORITY, EmissionsPeakTest  # noqa: E402
 
 OUT_DIR = Path(__file__).resolve().parent
 QUERY = "Q1"
@@ -68,16 +68,15 @@ def run_one(dataset: str, region: str) -> pd.DataFrame:
     """Run compare_methods for one dataset/region; return per-method results."""
     file, variable = DATASETS[dataset]
     tester = EmissionsPeakTest()
-    with contextlib.redirect_stdout(io.StringIO()):
-        tester.load_historical_data(file, region=region, variable=variable, year_range=YEAR_RANGE)
-    with warnings.catch_warnings():
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        results = compare_methods(tester, selection="priority")
+        tester.load_historical_data(file, region=region, variable=variable, year_range=YEAR_RANGE)
+        tester.compare_methods(selection="priority")
 
-    results = results.drop(columns=["noise"], errors="ignore").reset_index()
+    results = tester.method_comparison.drop(columns=["noise"], errors="ignore").reset_index()
     results.insert(0, "region", region)
     results.insert(0, "dataset", dataset)
-    results["selected"] = results["method"] == results.attrs.get("selected")
+    results["selected"] = results["method"] == tester.selected_method
     return results
 
 
@@ -252,7 +251,7 @@ Warnings (structural breaks, and outliers flagged in the last 3 historical years
 
 ## Settings
 
-- `compare_methods(selection="priority")`, alpha = 0.05, up to 3 GESD exclusions, last 3 historical years protected.
+- `EmissionsPeakTest.compare_methods(selection="priority")`, alpha = 0.05, up to 3 GESD exclusions, last 3 historical years protected.
 - Data: `data/processed/edgar_energy_co2.csv`, `data/processed/gcb_hist_co2.csv`; years {YEAR_RANGE.start}–{YEAR_RANGE.stop - 1}.
 - Outputs: `{QUERY}_1_method_results.csv` (per method), `{QUERY}_2_selection.csv` (per region).
 """

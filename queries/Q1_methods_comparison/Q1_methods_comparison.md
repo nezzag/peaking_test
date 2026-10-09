@@ -163,6 +163,6 @@ Warnings (structural breaks, and outliers flagged in the last 3 historical years
 
 ## Settings
 
-- `compare_methods(selection="priority")`, alpha = 0.05, up to 3 GESD exclusions, last 3 historical years protected.
+- `EmissionsPeakTest.compare_methods(selection="priority")`, alpha = 0.05, up to 3 GESD exclusions, last 3 historical years protected.
 - Data: `data/processed/edgar_energy_co2.csv`, `data/processed/gcb_hist_co2.csv`; years 1970–2024.
 - Outputs: `Q1_1_method_results.csv` (per method), `Q1_2_selection.csv` (per region).

@@ -12,9 +12,14 @@ Usage:
     
     # Load your data
     peak_test.load_historical_data('path/to/your/data.csv')
-    
-    # Characterize noise
-    peak_test.characterize_noise(method='all_data')  # or 'segments'
+
+    # Characterize noise. By default (method="priority") this tests the trend
+    # decomposition methods and uses the first (by priority) whose noise passes the
+    # diagnostic tests, excluding any outlier years identified (or warns if none passes)
+    peak_test.characterize_noise()  # or method="backtest"
+    print(peak_test.summarise_method_comparison())
+    # ...or use a specific method; its test results are reported, pass or fail
+    peak_test.characterize_noise(method='hp')
     
     # Set test data
     test_data = [(2021, 36500), (2022, 35800), (2023, 35100)]
@@ -36,9 +41,11 @@ Authors: Neil Grant and Claire Fyson
 # Module Imports
 # =================================
 
+import contextlib
+import io
 from pathlib import Path
 import warnings
-from typing import Tuple, Dict, Optional, Callable, Union
+from typing import Tuple, Dict, List, Optional, Callable, Union
 import numpy as np
 import pandas as pd
 from pandas_indexing import isin
@@ -55,8 +62,291 @@ from sklearn.metrics import r2_score, mean_squared_error
 warnings.filterwarnings("ignore")
 
 # An AR(1) noise process is used when a lag-1 Ljung-Box test on the residuals has a
-# p-value below this threshold. Imported by compare_methods.py so both make the same choice
+# p-value below this threshold. Used both when characterising the noise and when
+# selecting a method, so both make the same choice
 AR1_PVALUE_THRESHOLD = 0.1
+
+# Trend decomposition methods compared when selecting a method
+METHODS = [
+    "linear",
+    "linear_w_autocorrelation",
+    "broken_trend",
+    "hp",
+    "hamilton",
+    "spline",
+    "lowess",
+]
+
+# Order of preference used by selection="priority": the first passing method in this
+# list is selected
+# Rationale: methods with explicit structure come first, then the flexible smoothers
+# (a more in-depth analysis via backtest showed they tend to absorb noise),
+# with Hamilton last given its open issues.
+METHOD_PRIORITY = [
+    "broken_trend",
+    "linear_w_autocorrelation",
+    "linear",
+    "hp",
+    "spline",
+    "lowess",
+    "hamilton",
+]
+
+# Ways of selecting a method from those passing the diagnostic tests
+SELECTION_OPTIONS = ("priority", "backtest")
+
+
+class MethodSelectionWarning(UserWarning):
+    """No decomposition method passes the diagnostic tests, or a failing method is used."""
+
+
+# Always shown, even though other warnings are silenced above
+warnings.filterwarnings("always", category=MethodSelectionWarning)
+
+
+# =================================
+# Statistical tests used to select a method
+# =================================
+# Excluding a year leaves a gap in the series. These helpers work on a series
+# reindexed to a continuous range of years (NaN in the gaps), so that lags are
+# never computed across a removed year.
+
+
+def _to_full_index(series: pd.Series) -> pd.Series:
+    """Reindex a year-indexed series to a continuous range of years."""
+    series = series.sort_index()
+    return series.reindex(range(int(series.index.min()), int(series.index.max()) + 1))
+
+
+def _n_lags(series: pd.Series) -> int:
+    """Number of lags for Ljung-Box / ARCH: min(10, n/5)."""
+    return max(1, min(10, series.notna().sum() // 5))
+
+
+def ljung_box(series: pd.Series, lags: Optional[int] = None) -> Dict:
+    """
+    Ljung-Box test for autocorrelation, ignoring pairs that span a gap.
+
+    Returns p-values at lag 1 and at `lags`. The series fails if either is
+    significant (lag 1 catches simple AR(1) structure that a joint test over
+    many lags can dilute).
+    """
+    full = _to_full_index(series)
+    lags = lags or _n_lags(full)
+    n = full.notna().sum()
+    rho = acf(full.values, nlags=lags, missing="conservative", fft=False)[1:]
+    q = n * (n + 2) * np.cumsum(rho**2 / (n - np.arange(1, lags + 1)))
+    pvalues = stats.chi2.sf(q, np.arange(1, lags + 1))
+    return {"p_lag1": pvalues[0], "p_lagL": pvalues[-1], "lags": lags}
+
+
+def arch_test(series: pd.Series, lags: Optional[int] = None) -> float:
+    """
+    Engle's ARCH LM test: regress squared residuals on their own lags.
+    Rows where any lag falls in a gap are dropped. Returns the p-value.
+    """
+    full = _to_full_index(series)
+    lags = lags or _n_lags(full)
+    sq = (full - full.mean()) ** 2
+    df = pd.concat([sq.shift(i).rename(i) for i in range(lags + 1)], axis=1).dropna()
+    y = df[0].values
+    X = np.column_stack([np.ones(len(df)), df.drop(columns=0).values])
+    model = OLS(y, X).fit()
+    lm = len(df) * model.rsquared
+    return stats.chi2.sf(lm, lags)
+
+
+def fit_ar1(residuals: pd.Series) -> Dict:
+    """
+    Fit r_t = c + phi * r_{t-1} + e_t, using only consecutive-year pairs.
+    Returns phi and the innovations e_t (indexed by year t).
+    """
+    full = _to_full_index(residuals)
+    df = pd.concat([full.rename("y"), full.shift(1).rename("x")], axis=1).dropna()
+    X = np.column_stack([np.ones(len(df)), df["x"].values])
+    model = OLS(df["y"].values, X).fit()
+    innovations = pd.Series(index=df.index, data=model.resid)
+    return {"phi": model.params[1], "innovations": innovations}
+
+
+def normality_test(series: pd.Series) -> Dict:
+    """
+    Jarque-Bera test, plus its two components so that a failure can be
+    attributed to skewness or to heavy tails (excess kurtosis).
+    """
+    x = series.dropna().values
+    n = len(x)
+    skew = stats.skew(x)
+    ex_kurt = stats.kurtosis(x)  # Fisher definition: normal = 0
+    jb = stats.jarque_bera(x)
+    return {
+        "p": jb.pvalue,
+        "skew": skew,
+        "excess_kurtosis": ex_kurt,
+        "jb_skew_component": n / 6 * skew**2,
+        "jb_kurtosis_component": n / 24 * ex_kurt**2,
+    }
+
+
+def gesd(series: pd.Series, max_k: int = 3, alpha: float = 0.05) -> List[int]:
+    """
+    Generalized ESD test (Rosner, 1983) for up to `max_k` outliers.
+
+    Iteratively removes the most extreme point (by ordinary z-score on the
+    remaining data) and compares it with a critical value lambda_i. The number
+    of outliers is the largest i for which R_i > lambda_i.
+
+    Returns flagged index labels, most extreme first.
+    """
+    x = series.dropna().copy()
+    n = len(x)
+    candidates, n_outliers = [], 0
+    for i in range(1, min(max_k, n - 2) + 1):
+        deviations = (x - x.mean()).abs()
+        idx = deviations.idxmax()
+        R = deviations[idx] / x.std(ddof=1)
+        p = 1 - alpha / (2 * (n - i + 1))
+        t = stats.t.ppf(p, n - i - 1)
+        lam = (n - i) * t / np.sqrt((n - i - 1 + t**2) * (n - i + 1))
+        candidates.append(idx)
+        if R > lam:
+            n_outliers = i
+        x = x.drop(idx)
+    return [int(c) for c in candidates[:n_outliers]]
+
+
+def _adjacent_years(year: int, noise_years, excluded: List[int]) -> List[int]:
+    """
+    The nearest years before and after `year`, among years that are either in the
+    noise series or already excluded. Years dropped only because they lag across
+    an excluded year (e.g. 1993 after excluding 1992 in a lag-based method) are
+    skipped over, so 1992 and 1994 still count as adjacent.
+    """
+    available = sorted(set(int(y) for y in noise_years) | set(excluded))
+    before = [y for y in available if y < year]
+    after = [y for y in available if y > year]
+    return ([before[-1]] if before else []) + ([after[0]] if after else [])
+
+
+def _diagnostic_status(d: Dict, alpha: float) -> str:
+    """Classify a diagnostics dict into a pass / failure-reason label."""
+    if d["lb_noise_p"] < alpha or (d["ar1_used"] and abs(d["phi"]) >= 1):
+        return "fail_autocorrelation"
+    if d["arch_p"] < alpha:
+        return "fail_arch"
+    norm = d["normality"]
+    if norm["p"] < alpha:
+        heavy_tails = (
+            norm["excess_kurtosis"] > 0
+            and norm["jb_kurtosis_component"] >= norm["jb_skew_component"]
+        )
+        return "fail_normality_heavy_tails" if heavy_tails else "fail_normality_skewed"
+    return "pass"
+
+
+def _detrended_sd(values: np.ndarray, years: np.ndarray) -> np.ndarray:
+    """
+    Residual standard deviation around a straight line fitted to each row of `values`
+    (shape (n_samples, n_years) or (n_years,)), with n - 2 degrees of freedom.
+    """
+    X = np.column_stack([np.ones(len(years)), years - years.mean()])
+    hat = X @ np.linalg.pinv(X)
+    resid = values - values @ hat.T
+    return np.sqrt((resid**2).sum(axis=-1) / (len(years) - 2))
+
+
+def _recent_trend(emissions: pd.Series, n_years: int = 5) -> float:
+    """Slope of a linear fit to the last `n_years` of emissions (as in load_historical_data)."""
+    recent = emissions.tail(n_years)
+    return np.polyfit(recent.index.values, recent.values, 1)[0]
+
+
+def _summarise_backtest(windows: pd.DataFrame) -> Dict:
+    """Aggregate per-origin backtest scores (from _backtest_method) into summary metrics."""
+    pit = windows["pit"]
+    return {
+        "bt_scatter_log_score": windows["scatter_log_score"].mean(),
+        # Typical realised / predicted scatter: ~1 if sigma and phi are right
+        "bt_scatter_ratio": np.exp(np.log(windows["scatter_ratio"]).mean()),
+        "bt_slope_log_score": windows["slope_log_score"].mean(),
+        # Share of realised slopes inside the central 90% of the null distribution
+        "bt_slope_coverage90": ((pit >= 0.05) & (pit <= 0.95)).mean(),
+        # Share of windows where the test would have declared a significant decline
+        # at p < 0.1 under the recent-trend null
+        "bt_rate_p10": (pit < 0.1).mean(),
+        "bt_n_windows": len(windows),
+    }
+
+
+def select_method(results: pd.DataFrame, selection: str = "priority") -> Optional[str]:
+    """
+    Choose a method from those that pass the diagnostic tests. Returns None if none pass.
+
+        - "priority": the first passing method in METHOD_PRIORITY
+        - "backtest": the passing method with the best backtest scatter log score
+          (requires the bt_* columns from compare_methods(selection="backtest"))
+    """
+    passing = results.index[results["passes"]].tolist()
+    if not passing:
+        return None
+
+    if selection == "priority":
+        ranked = [m for m in METHOD_PRIORITY if m in passing]
+        # Methods missing from METHOD_PRIORITY come last, in the order they were run
+        return (ranked + [m for m in passing if m not in ranked])[0]
+
+    if selection == "backtest":
+        return results.loc[passing, "bt_scatter_log_score"].idxmax()
+
+    raise ValueError(f"selection must be one of {SELECTION_OPTIONS}")
+
+
+def summarise_method_comparison(results: pd.DataFrame) -> str:
+    """Human-readable summary table of EmissionsPeakTest.compare_methods() output."""
+    cols = ["status", "years_excluded", "ar1_used", "phi", "lb_p", "arch_p", "jb_p",
+            "skew", "excess_kurtosis", "initial_status", "warning"]
+    table = results.reindex(columns=cols).copy()
+    for c in ["phi", "lb_p", "arch_p", "jb_p", "skew", "excess_kurtosis"]:
+        table[c] = table[c].map(lambda v: "" if pd.isna(v) else f"{v:.3f}")
+    table["warning"] = table["warning"].fillna("")
+
+    passing = results.index[results["passes"]].tolist()
+    lines = [table.to_string(), ""]
+    if not passing:
+        lines.append("WARNING: no method passes all tests.")
+        return "\n".join(lines)
+
+    lines.append("Methods passing all tests:")
+    if "bt_scatter_log_score" in results:
+        bt_cols = {
+            "bt_scatter_log_score": "scatter_score",
+            "bt_scatter_ratio": "scatter_ratio",
+            "bt_slope_coverage90": "slope_cov90",
+            "bt_rate_p10": "rate_p<0.1",
+        }
+        bt = results.loc[passing, ["years_excluded", *bt_cols]].rename(columns=bt_cols)
+        bt = bt.sort_values("scatter_score", ascending=False)
+        lines.append(bt.to_string(float_format=lambda v: f"{v:.3f}"))
+        lines.append(
+            "  scatter_score: backtest log score, higher is better (used for selection)\n"
+            "  scatter_ratio: realised / predicted scatter in 5-yr windows (~1 ideal, >1 noise too narrow)\n"
+            "  slope_cov90 / rate_p<0.1: slope calibration under the recent-trend null (0.90 / 0.10 ideal;\n"
+            "  affected by real trend changes, not just noise)"
+        )
+    else:
+        for m in passing:
+            excl = results.loc[m, "years_excluded"]
+            lines.append(f"  - {m}" + (f" (excluding {excl})" if excl else ""))
+
+    selected = results.attrs.get("selected")
+    if selected:
+        excl = results.loc[selected, "years_excluded"]
+        lines.append(
+            f"\nSuggested method ({results.attrs.get('selection')}): {selected}"
+            + (f" (excluding {excl})" if excl else "")
+        )
+    return "\n".join(lines)
+
 
 # =================================
 # Define Key Class
@@ -83,6 +373,11 @@ class EmissionsPeakTest:
         noise_generator (Callable): Function to generate noise samples
         bootstrap_results (Dict): Results from the bootstrap hypothesis test
         residuals (np.ndarray): Residuals from trend fitting
+        method_comparison (pd.DataFrame): Diagnostic test results for each trend method
+            (from compare_methods(), run by characterize_noise() when selecting a method)
+        selected_method (str): Method selected from those passing the tests. None if no
+            method passes
+        selected_ignore_years (list): Outlier years excluded for the selected method
     """
 
     def __init__(self):
@@ -100,6 +395,9 @@ class EmissionsPeakTest:
         self.residuals: Optional[pd.Series] = None
         self.trend: Optional[pd.Series] = None
         self.trend_info: Optional[Dict] = None
+        self.method_comparison: Optional[pd.DataFrame] = None
+        self.selected_method: Optional[str] = None
+        self.selected_ignore_years: List[int] = []
 
     def __getstate__(self) -> Dict:
         """Drop the unpicklable closure before serialisation."""
@@ -129,8 +427,9 @@ class EmissionsPeakTest:
 
         Args:
             data_source: Path to CSV file or pandas DataFrame
-            year_col: Name of the year column
-            emissions_col: Name of the emissions column
+            region: ISO3 code of the region
+            variable: Variable to load
+            year_range: Years of historical data to keep
 
         Returns:
             Self for method chaining
@@ -202,7 +501,12 @@ class EmissionsPeakTest:
             f"Loaded historical data: {self.historical_data.index.min()}-{self.historical_data.index.max()}"
         )
         print(f"Data points: {len(self.historical_data)}")
-        
+
+        # Any previous method comparison was for other data
+        self.method_comparison = None
+        self.selected_method = None
+        self.selected_ignore_years = []
+
         return self
 
     def _validate_historical_data(self) -> None:
@@ -220,29 +524,388 @@ class EmissionsPeakTest:
             raise ValueError("Historical emissions cannot be negative")
 
     # =================================
+    # A2) Selecting a trend decomposition method
+    # =================================
+
+    def compare_methods(
+        self,
+        selection: str = "priority",
+        methods: List[str] = METHODS,
+        alpha: float = 0.05,
+        max_exclusions: int = 3,
+        n_protected: int = 3,
+        method_kwargs: Optional[Dict[str, Dict]] = None,
+        n_test_years: int = 5,
+    ) -> pd.DataFrame:
+        """
+        Decompose the historical data with each trend method, test whether the noise
+        satisfies the assumptions of the peak test, and select a method that does.
+
+        For each method the noise is tested for:
+            1. Autocorrelation (Ljung-Box) - either in the residuals directly, or in the
+               innovations once an AR(1) process has been removed
+            2. Heteroskedasticity (ARCH LM test)
+            3. Normality (Jarque-Bera)
+
+        If ARCH or normality fail, outlier years are detected with a generalized ESD
+        (Rosner) test and removed one at a time (most extreme first), refitting the trend
+        each time, up to `max_exclusions` years. Years in the last `n_protected`
+        historical years are never removed automatically - they are reported as
+        warnings. If the next year to remove is adjacent to another flagged/excluded year
+        with a residual of the same sign, this is treated as a structural break rather
+        than outliers, and the method fails.
+
+        One of the passing methods is then selected:
+            - "priority": the first passing method in METHOD_PRIORITY
+            - "backtest": the best rolling-origin calibration backtest of the method's
+              noise model (see _backtest_method) - slow, ~10 s per passing method
+
+        Called by characterize_noise(method="priority"/"backtest"); call it directly to
+        inspect the results or change the settings.
+
+        Args:
+            selection: "priority" or "backtest"
+            methods: Methods to compare
+            alpha: Significance level for the diagnostic and outlier tests
+            max_exclusions: Maximum number of outlier years removed per method
+            n_protected: Number of final historical years that are never removed
+            method_kwargs: Optional {method: kwargs} passed to the decomposition
+            n_test_years: Length of the test window used in the backtest
+
+        Returns:
+            DataFrame indexed by method (also stored as self.method_comparison). The
+            `noise` column holds the final residual/innovation series tested for each
+            method, and (for backtest) `bt_windows` the per-origin backtest scores. The
+            selected method and its excluded years are stored as self.selected_method
+            and self.selected_ignore_years.
+        """
+        if self.historical_data is None:
+            raise ValueError("Must load historical data first")
+        if selection not in SELECTION_OPTIONS:
+            raise ValueError(f"selection must be one of {SELECTION_OPTIONS}")
+        method_kwargs = method_kwargs or {}
+
+        rows = []
+        for method in methods:
+            try:
+                rows.append(
+                    self._evaluate_method(
+                        method, alpha, max_exclusions, n_protected, method_kwargs.get(method, {})
+                    )
+                )
+            except Exception as e:
+                rows.append({"method": method, "status": "error", "passes": False, "warning": str(e)})
+
+        if selection == "backtest":
+            passing_rows = [row for row in rows if row["passes"]]
+            for row in passing_rows:
+                row["bt_windows"] = self._backtest_method(
+                    row["method"], row["years_excluded"], n_test_years=n_test_years,
+                    method_kwargs=method_kwargs.get(row["method"], {}),
+                )
+            # Score every method on the same set of windows, so the scores are comparable
+            if passing_rows:
+                common = passing_rows[0]["bt_windows"].index
+                for row in passing_rows[1:]:
+                    common = common.intersection(row["bt_windows"].index)
+                for row in passing_rows:
+                    row.update(_summarise_backtest(row["bt_windows"].loc[common]))
+
+        results = pd.DataFrame(rows).set_index("method")
+        results.attrs["selection"] = selection
+        results.attrs["selected"] = select_method(results, selection)
+
+        self.method_comparison = results
+        self.selected_method = results.attrs["selected"]
+        self.selected_ignore_years = (
+            list(results.loc[self.selected_method, "years_excluded"]) if self.selected_method else []
+        )
+
+        if self.selected_method is None:
+            warnings.warn(
+                f"No trend decomposition method passes the diagnostic tests (autocorrelation, "
+                f"ARCH, normality) for {self.region} ({self.variable}). Peak test results "
+                "should be treated with caution; pass a method name to characterize_noise() to "
+                "use one anyway. See summarise_method_comparison() for details.",
+                MethodSelectionWarning,
+                stacklevel=2,
+            )
+        else:
+            passing = results.index[results["passes"]].tolist()
+            print(
+                f"Method selection ({selection}): {self.selected_method}"
+                + (f", excluding {self.selected_ignore_years}" if self.selected_ignore_years else "")
+            )
+            print(f"  Methods passing all tests: {', '.join(passing)}")
+            warning = results.loc[self.selected_method, "warning"]
+            if isinstance(warning, str):
+                print(f"  Note: {warning}")
+
+        return results
+
+    def summarise_method_comparison(self) -> str:
+        """Human-readable summary of the last compare_methods() results."""
+        if self.method_comparison is None:
+            raise ValueError("Run compare_methods() first")
+        return summarise_method_comparison(self.method_comparison)
+
+    def _diagnose_method(self, method: str, excluded: List[int], method_kwargs: Dict) -> Dict:
+        """Fit the trend (excluding `excluded` years) and run all diagnostics."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, trend, _ = self._calculate_residuals(
+                method, ignore_years=excluded or None, **method_kwargs
+            )
+        # Recompute residuals as data - trend so the sign convention is the same for all methods
+        emissions = self.historical_data["emissions"]
+        residuals = (emissions.loc[trend.index] - trend).dropna()
+
+        # Use AR(1) on the same lag-1 rule as _analyze_autocorrelation. Whether AR(1) was
+        # sufficient is then checked by the multi-lag Ljung-Box test on the noise
+        lb_resid = ljung_box(residuals)
+        ar1_used = lb_resid["p_lag1"] < AR1_PVALUE_THRESHOLD
+
+        if ar1_used:
+            ar = fit_ar1(residuals)
+            phi, noise = ar["phi"], ar["innovations"]
+            lb_noise = ljung_box(noise)
+        else:
+            phi, noise, lb_noise = None, residuals, lb_resid
+
+        return {
+            "residuals": residuals,
+            "noise": noise,  # the series the ARCH and normality tests apply to
+            "ar1_used": ar1_used,
+            "phi": phi,
+            "lb_resid_p": min(lb_resid["p_lag1"], lb_resid["p_lagL"]),
+            "lb_noise_p": min(lb_noise["p_lag1"], lb_noise["p_lagL"]),
+            "arch_p": arch_test(noise),
+            "normality": normality_test(noise),
+        }
+
+    def _evaluate_method(
+        self,
+        method: str,
+        alpha: float = 0.05,
+        max_exclusions: int = 3,
+        n_protected: int = 3,
+        method_kwargs: Optional[Dict] = None,
+    ) -> Dict:
+        """
+        Run the diagnostics for one method, removing GESD-flagged outlier years
+        (up to `max_exclusions`) if ARCH or normality fail.
+
+        Outlier removal is not attempted for autocorrelation failures, since
+        remaining autocorrelation points to a mis-specified trend, not outliers.
+        """
+        method_kwargs = method_kwargs or {}
+        hist_years = self.historical_data.index
+        protected = set(hist_years[-n_protected:]) if n_protected > 0 else set()
+
+        excluded: List[int] = []
+        excluded_signs: Dict[int, float] = {}  # sign of each excluded year's noise when it was flagged
+        flagged_protected: List[int] = []
+        break_years: List[int] = []
+
+        d = self._diagnose_method(method, excluded, method_kwargs)
+        initial = d
+        status = _diagnostic_status(d, alpha)
+
+        while status in ("fail_arch", "fail_normality_heavy_tails", "fail_normality_skewed"):
+            budget = max_exclusions - len(excluded)
+            if budget <= 0:
+                break
+            flagged = gesd(d["noise"], max_k=budget, alpha=alpha)
+            flagged_protected += [y for y in flagged if y in protected and y not in flagged_protected]
+            eligible = [y for y in flagged if y not in protected]
+            if not eligible:
+                break
+            candidate = int(eligible[0])
+
+            # Check whether the candidate is next to another flagged/excluded year with the
+            # same sign. That points to a sustained shift the trend can't follow (a structural
+            # break), not a one-off outlier, so years shouldn't be removed. A one-off shock
+            # followed by a rebound (e.g. 2020/2021) has opposite signs and is not caught here.
+            signs = {**excluded_signs, **{y: np.sign(d["noise"][y]) for y in flagged}}
+            neighbours = _adjacent_years(candidate, d["noise"].index, excluded)
+            same_sign = [y for y in neighbours if signs.get(y) == signs[candidate]]
+            if same_sign:
+                status = "fail_structural_break"
+                break_years = sorted({candidate, *same_sign})
+                break
+
+            excluded.append(candidate)
+            excluded_signs[candidate] = signs[candidate]
+            d = self._diagnose_method(method, sorted(excluded), method_kwargs)
+            status = _diagnostic_status(d, alpha)
+
+        if status == "pass" and excluded:
+            status = "pass_with_exclusions"
+
+        messages = []
+        if break_years:
+            messages.append(
+                f"possible structural break around {break_years[0]}-{break_years[-1]} "
+                "(consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints"
+            )
+        if flagged_protected:
+            messages.append(
+                f"{sorted(flagged_protected)} flagged as outlier(s) but within the last "
+                f"{n_protected} historical years - not excluded, review manually"
+            )
+        warning = "; ".join(messages) or None
+
+        return {
+            "method": method,
+            "status": status,
+            "passes": status.startswith("pass"),
+            # Years removed; if the method still fails these are the years that were tried
+            "years_excluded": sorted(excluded),
+            "flagged_protected": sorted(flagged_protected),
+            "break_years": break_years,
+            "n": len(d["noise"]),
+            "ar1_used": d["ar1_used"],
+            "phi": d["phi"],
+            "lb_p": d["lb_noise_p"],
+            "arch_p": d["arch_p"],
+            "jb_p": d["normality"]["p"],
+            "skew": d["normality"]["skew"],
+            "excess_kurtosis": d["normality"]["excess_kurtosis"],
+            "initial_status": _diagnostic_status(initial, alpha),
+            "initial_lb_p": initial["lb_noise_p"],
+            "initial_arch_p": initial["arch_p"],
+            "initial_jb_p": initial["normality"]["p"],
+            "warning": warning,
+            "noise": d["noise"],
+        }
+
+    def _simulate_noise(self, n_years: int, n_samples: int) -> np.ndarray:
+        """Draw noise paths from the noise generator, choosing AR(1)/white noise as the test does."""
+        use_ar = self.autocorr_params["has_autocorr"] and self.autocorr_params["is_stationary"]
+        if use_ar:
+            return np.array([self.noise_generator(n_years, initial_value=None) for _ in range(n_samples)])
+        return np.array([self.noise_generator(n_years) for _ in range(n_samples)])
+
+    def _backtest_method(
+        self,
+        method: str,
+        excluded: List[int],
+        n_test_years: int = 5,
+        min_train_years: int = 20,
+        n_bootstrap: int = 1000,
+        method_kwargs: Optional[Dict] = None,
+        seed: int = 0,
+    ) -> pd.DataFrame:
+        """
+        Rolling-origin calibration backtest of one method's noise model. Returns the
+        scores for each origin; aggregate them with _summarise_backtest.
+
+        The peak test only takes the noise (sigma, phi) from the decomposition method -
+        the null trajectory itself is the recent historical trend. So methods are ranked
+        on how well their noise describes what actually happened next.
+
+        For each origin T (with at least `min_train_years` of data up to T, and
+        `n_test_years` of data after it), the method is fitted on years <= T (ignoring
+        any of `excluded` that fall in that range), and the bootstrap null distribution
+        of slopes for T+1..T+N is generated exactly as in the peak test, under the
+        "recent_trend" null. Two things are scored:
+
+        1. Scatter (used for ranking): the standard deviation of actual emissions around
+           a straight line fitted to T+1..T+N, against the distribution of the same
+           statistic for simulated noise. This is set by the same sigma/phi that set the
+           test's slope uncertainty, but does not depend on the trend being right.
+            - scatter_log_score: log density of the realised scatter (KDE on log scale)
+            - scatter_ratio: realised / median simulated scatter (>1: noise too narrow)
+
+        2. Slope (diagnostic): the realised slope against the bootstrap null slopes.
+            - pit: share of simulated slopes <= realised slope, i.e. the peak test's
+              one-tailed p-value at that origin
+            - slope_log_score: log density of the realised slope (normal approximation)
+           Realised slopes include real changes in trend (e.g. the 2000s acceleration),
+           so this mixes noise calibration with how well the recent-trend null holds.
+        """
+        method_kwargs = method_kwargs or {}
+        emissions = self.historical_data["emissions"]
+        years = emissions.index
+        origins = [T for T in years
+                   if (T - years[0] + 1) >= min_train_years and T + n_test_years <= years[-1]]
+
+        rows = []
+        for T in origins:
+            bt = type(self)()
+            bt.region, bt.variable, bt.unit = self.region, self.variable, self.unit
+            bt.historical_data = self.historical_data.loc[:T].copy()
+            bt.recent_historical_trend = _recent_trend(bt.historical_data["emissions"])
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    bt._fit_noise(
+                        method=method, noise_type="normal",
+                        ignore_years=[y for y in excluded if y <= T] or None, **method_kwargs,
+                    )
+                    bt.create_noise_generator()
+                    bt.set_test_data(self.historical_data.loc[T + 1 : T + n_test_years].copy())
+                    # Same random numbers for every method at a given origin, so differences
+                    # between methods are not down to simulation noise
+                    np.random.seed(seed + int(T))
+                    slopes = bt._generate_bootstrap_slopes(n_bootstrap, "recent_trend", "ar_bootstrap")
+                    sim_sd = _detrended_sd(bt._simulate_noise(n_test_years, n_bootstrap),
+                                           bt.test_data.index.values.astype(float))
+            except Exception:
+                # e.g. a method that cannot be fitted on a short training sample - skip this origin
+                continue
+
+            realised = bt.test_slope
+            realised_sd = _detrended_sd(bt.test_data["emissions"].values,
+                                        bt.test_data.index.values.astype(float))
+            rows.append({
+                "origin": T,
+                "scatter_log_score": stats.gaussian_kde(np.log(sim_sd))(np.log(realised_sd))[0],
+                "scatter_ratio": realised_sd / np.median(sim_sd),
+                "pit": np.mean(slopes <= realised),
+                "slope_log_score": stats.norm.logpdf(realised, slopes.mean(), slopes.std()),
+            })
+
+        windows = pd.DataFrame(rows, columns=["origin", "scatter_log_score", "scatter_ratio",
+                                              "pit", "slope_log_score"]).set_index("origin")
+        windows["scatter_log_score"] = np.log(windows["scatter_log_score"])
+        return windows
+
+    # =================================
     # B) Characterising the noise in the data
     # =================================
 
     def characterize_noise(
         self,
-        method: str = "lowess",
+        method: str = "priority",
         noise_type: str = "t-dist",
         t_df: Optional[float] = None,
-        ignore_years: list = None,
+        ignore_years: Optional[list] = None,
         include_test_data: bool = False,
         **kwargs,
     ) -> "EmissionsPeakTest":
         """
         Characterize the noise distribution in historical emissions data.
 
+        The trend decomposition method is chosen with `method`, which is one of:
+            - "priority" (default): test every method's noise (see compare_methods) and
+              use the first passing method in METHOD_PRIORITY
+            - "backtest": test every method, and use the passing method with the best
+              calibration backtest (slow, ~10 s per passing method)
+            - a method name from METHODS (e.g. "hp"): use that method. Its noise is still
+              tested and the results reported, with a warning if it does not pass
+        Unless ignore_years is given, the outlier years identified in testing are
+        excluded (for a named method, only if it passes). A "priority" or "backtest"
+        comparison already run on this data is reused - run compare_methods() first to
+        change its settings.
+
         Args:
-            method: str: Decide the method of TSA to use to extract results
+            method: "priority", "backtest" or a method name (see above)
             noise_type: 'normal' or 't-dist' or 'empirical' for noise distribution type
             t_df: Optional fixed degrees of freedom for t-distribution
-            ignore_years: Years to exclude
+            ignore_years: Years to exclude, overriding the outlier years identified in
+                testing. Pass [] to exclude no years
             include_test_data: Whether or not to include the test data in the system or not
             **kwargs: Additional arguments for specific methods. These include:
-                - fraction: float = 0.3. Use in lowess method, change to reduce/increase the width of 
+                - fraction: float = 0.3. Use in lowess method, change to reduce/increase the width of
                 dataset over which lowess is calculated
                 - forced_breakpoints: list[int]. use in broken_trend to force certain breakpoints
 
@@ -251,12 +914,25 @@ class EmissionsPeakTest:
         """
         if self.historical_data is None:
             raise ValueError("Must load historical data first")
-        
+
+        method, ignore_years = self._resolve_method(method, ignore_years, kwargs)
+        return self._fit_noise(method, noise_type, t_df, ignore_years, include_test_data, **kwargs)
+
+    def _fit_noise(
+        self,
+        method: str,
+        noise_type: str = "t-dist",
+        t_df: Optional[float] = None,
+        ignore_years: Optional[list] = None,
+        include_test_data: bool = False,
+        **kwargs,
+    ) -> "EmissionsPeakTest":
+        """Fit the noise for a given method and ignored years, without any method testing."""
         if include_test_data:
             if self.emissions_data is None:
                 raise ValueError("To run noise parameterisation with `include_test_data=True`" \
                 "you must first provide test data")
-        
+
         self.residuals, self.trend, self.trend_info = self._calculate_residuals(
             method, ignore_years, include_test_data, **kwargs
         )
@@ -268,6 +944,83 @@ class EmissionsPeakTest:
         print(f"  Method used: {method}")
 
         return self
+
+    def _resolve_method(
+        self, method: str, ignore_years: Optional[list], method_kwargs: Dict
+    ) -> Tuple[str, Optional[list]]:
+        """
+        Work out the method and ignored years for characterize_noise(), running the
+        diagnostic tests (see characterize_noise for the options).
+        """
+        if method in SELECTION_OPTIONS:
+            # Reuse an existing comparison with the same selection (getattr, as objects
+            # pickled before method selection existed lack this attribute)
+            comparison = getattr(self, "method_comparison", None)
+            if comparison is None or comparison.attrs.get("selection") != method:
+                self.compare_methods(selection=method)
+
+            if self.selected_method is None:
+                raise ValueError(
+                    "No trend decomposition method passes the diagnostic tests - pass a "
+                    f"method name (one of {METHODS}) to use one anyway. See "
+                    "summarise_method_comparison() for details"
+                )
+            if ignore_years is None and self.selected_ignore_years:
+                ignore_years = list(self.selected_ignore_years)
+                print(f"Ignoring outlier years identified in testing: {ignore_years}")
+            return self.selected_method, ignore_years
+
+        if method not in METHODS:
+            raise ValueError(
+                f"method must be one of {list(SELECTION_OPTIONS)} or a method in {METHODS}, "
+                f"not '{method}'"
+            )
+
+        # A named method: test it and report the results, but use it either way
+        if ignore_years is None:
+            # Test as in compare_methods, including outlier exclusion
+            result = self._evaluate_method(method, method_kwargs=method_kwargs)
+            if result["passes"] and result["years_excluded"]:
+                ignore_years = list(result["years_excluded"])
+        else:
+            # Test with exactly the years the user chose to ignore
+            d = self._diagnose_method(method, list(ignore_years), method_kwargs)
+            status = _diagnostic_status(d, 0.05)
+            result = {
+                "method": method, "status": status, "passes": status.startswith("pass"),
+                "years_excluded": sorted(ignore_years), "ar1_used": d["ar1_used"],
+                "phi": d["phi"], "lb_p": d["lb_noise_p"], "arch_p": d["arch_p"],
+                "jb_p": d["normality"]["p"], "skew": d["normality"]["skew"],
+                "excess_kurtosis": d["normality"]["excess_kurtosis"], "warning": None,
+                "noise": d["noise"],
+            }
+
+        results = pd.DataFrame([result]).set_index("method")
+        results.attrs["selection"] = method
+        results.attrs["selected"] = method
+        self.method_comparison = results
+        self.selected_method = method
+        self.selected_ignore_years = list(ignore_years or [])
+
+        print(
+            f"Diagnostic tests for {method}: {'PASS' if result['passes'] else 'FAIL'} "
+            f"({result['status']})"
+            + (f", excluding {ignore_years}" if ignore_years else "")
+            + f" - Ljung-Box p={result['lb_p']:.3f}, ARCH p={result['arch_p']:.3f}, "
+            f"Jarque-Bera p={result['jb_p']:.3f}"
+        )
+        if isinstance(result.get("warning"), str):
+            print(f"  Note: {result['warning']}")
+        if not result["passes"]:
+            warnings.warn(
+                f"Method '{method}' does not pass the diagnostic tests ({result['status']}) "
+                f"for {self.region} ({self.variable}); it is used anyway. Use "
+                'method="priority" to select a method that passes.',
+                MethodSelectionWarning,
+                stacklevel=3,
+            )
+
+        return method, ignore_years
 
     def _calculate_residuals(
         self, method: str, ignore_years: list = None, include_test_data: bool = False, **kwargs
