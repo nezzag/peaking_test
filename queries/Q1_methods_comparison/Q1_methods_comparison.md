@@ -7,6 +7,7 @@
 - [2. Status of every method](#2-status-of-every-method)
 - [3. Pass rates and failure reasons](#3-pass-rates-and-failure-reasons)
 - [4. Excluded years and warnings](#4-excluded-years-and-warnings)
+- [Next steps](#next-steps)
 - [Settings](#settings)
 
 ## Answer
@@ -154,6 +155,11 @@ Warnings (structural breaks, and outliers flagged in the last 3 historical years
 | GCB | IND | linear_w_autocorrelation: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; broken_trend: [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hp: [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hamilton: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; lowess: [2023, 2024] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually |
 | GCB | RUS | linear_w_autocorrelation: possible structural break around 1992-1994 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints |
 | GCB | TUR | lowess: [2022] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually |
+
+## Next steps
+
+1. **Investigate why India fails across all methods in both datasets.** The failure reasons differ by method (autocorrelation, ARCH, skew, and a possible 2019–2020 structural break), and 2023 is flagged as an outlier but protected. Candidates to test: forced breakpoints, a shorter historical period, and the t-distribution once it is added.
+2. **Consider whether the exclusion of years needs to be stronger.** 2009 (the global financial crisis) is almost never removed. Outlier detection only runs when ARCH or normality fail, and often removing 2020 alone is enough to pass. Flexible trends (hp, spline, lowess) and broken_trend breakpoints can also bend into 2009 and absorb part of the shock. Keeping a genuine shock in the noise inflates σ, which widens the null distribution and could make the peak test too conservative (false negatives: real peaks not detected). Options include always testing known shock years (e.g. 2009, 2020) as exclusion candidates, or running GESD whether or not the tests fail.
 
 ## Settings
 
