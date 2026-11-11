@@ -869,9 +869,10 @@ class EmissionsPeakTest:
         null_hypothesis: str | float | int = "zero_trend",
         bootstrap_method: str = "ar_bootstrap",
         n_years_for_trend: int = 5,
-        test_sequential: bool = False, 
+        test_sequential: bool = False,
         store_sequential_sims: bool = False, # choose to store simulations for plotting
-        
+        perturb_anchor: bool = False, # treat the anchor year as noisy in the sequential test
+
     ) -> Dict:
         """
         Run complete bootstrap test with all enhancements.
@@ -950,7 +951,8 @@ class EmissionsPeakTest:
         #### NEW: Sequential test method
             p_flat, av_p_step, p_steps_list, sims_dict = self._compute_sequential_p_flat(
                 n_bootstrap,
-                store_sims=store_sequential_sims
+                store_sims=store_sequential_sims,
+                perturb_anchor=perturb_anchor,
                                         ) # calculate probability of being consistent with a flat trend
 
             self.bootstrap_results.update({
@@ -1034,7 +1036,8 @@ class EmissionsPeakTest:
     # NEW function to calculate sequential p-flat
     def _compute_sequential_p_flat(self, n_bootstrap: int,
                                    null_hypothesis: str | float = "zero_trend",
-                                   store_sims = False) -> float:
+                                   store_sims = False,
+                                   perturb_anchor: bool = False) -> float:
         """
         This method calculates the probability of observing the test data under the null hypothesis by 
         sequentially evaluating the probability of each step in the test data being as low as observed, 
@@ -1048,6 +1051,14 @@ class EmissionsPeakTest:
                 - "2pc_decline" (testing if new data is consistent with a 2% per year decline)
                 - "3pc_decline" (testing if new data is consistent with a 3% per year decline)
                 - float: Give a specific trend to test if new data is consistent with
+            store_sims: Whether to store the simulated distributions for each step
+            perturb_anchor: If True, treat the anchor (first test year) as a noisy
+                observation rather than known truth. Each bootstrap replicate draws
+                its own anchor noise and shifts the null reference to the implied
+                true level (obs[0] - a), integrating anchor uncertainty into every
+                step's null distribution. Recovers the correct 2-noise-source
+                variance (2*sigma^2 when phi=0) and removes the spurious
+                significance that a high candidate-peak year would otherwise cause.
          Returns:            p_flat: Overall probability of observing the test data under the null hypothesis, calculated as the product of the stepwise probabilities
             av_p_step: Average of the stepwise probabilities (for interpretation)
             p_steps_series: pd.Series with the stepwise probabilities for each year
@@ -1058,7 +1069,7 @@ class EmissionsPeakTest:
 
         obs = self.test_data["emissions"].values
         years = self.test_data.index.values
-        n_steps = len(obs) - 1 
+        n_steps = len(obs) - 1  
         start_value = obs[0]
 
         p_flat = 1.0
@@ -1093,22 +1104,33 @@ class EmissionsPeakTest:
             y_next_obs = obs[t + 1]
 
             sims = []
+            use_ar = (
+                self.autocorr_params["has_autocorr"]
+                and self.autocorr_params["is_stationary"]
+            )
             null_emissions_next = start_value + null_trend*(t+1)  # expected next value under null hypothesis, given starting value and null trend
             null_emissions_prev = start_value + null_trend*t  # expected previous value under null hypothesis, given starting value and null trend
             for _ in range(n_bootstrap):
 
                 # generate ONE step of noise
-                if (
-                    self.autocorr_params["has_autocorr"]
-                    and self.autocorr_params["is_stationary"]
-                ):
-                    noise = self.noise_generator(1, initial_value=None)[0]
+                noise = self.noise_generator(1, initial_value=None)[0] if use_ar else self.noise_generator(1)[0]
+
+                if perturb_anchor:
+                    # Treat the anchor as noisy (obs[0] = true_level + a): draw a
+                    # candidate anchor noise and shift the null reference to the
+                    # implied true level obs[0] - a for this replicate. Both the
+                    # null level and residual_prev move with it.
+                    a = self.noise_generator(1, initial_value=None)[0] if use_ar else self.noise_generator(1)[0]
+                    ref_level = start_value - a
+                    nen = ref_level + null_trend*(t+1)
+                    nep = ref_level + null_trend*t
                 else:
-                    noise = self.noise_generator(1)[0]
+                    nen = null_emissions_next
+                    nep = null_emissions_prev
 
                 # AR(1) step (adapt if your exact form differs)
-                residual_prev = y_prev - null_emissions_prev  # deviation of the previous observed year from the null (0 for the first step)
-                y_next_sim = null_emissions_next + phi_eff * (residual_prev) + noise  # null trend + AR(1) re-centring (0 when no autocorrelation) + noise
+                residual_prev = y_prev - nep  # deviation of the previous observed year from the null (0 for the first step when anchor not perturbed)
+                y_next_sim = nen + phi_eff * (residual_prev) + noise  # null trend + AR(1) re-centring (0 when no autocorrelation) + noise
 
                 sims.append(y_next_sim)
 
