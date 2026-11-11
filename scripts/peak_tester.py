@@ -1078,6 +1078,15 @@ class EmissionsPeakTest:
         else:  # zero_trend
             null_trend = 0.0
 
+        # Only re-centre the null on the previous observed value when
+        # autocorrelation is present and stationary. Otherwise phi_eff = 0, so
+        # the null stays a pure anchor at the start of the test period and the
+        # previous year's value has no influence.
+        if self.autocorr_params["has_autocorr"] and self.autocorr_params["is_stationary"]:
+            phi_eff = self.autocorr_params["phi"]
+        else:
+            phi_eff = 0.0
+
         for t in range(n_steps):
 
             y_prev = obs[t]
@@ -1098,8 +1107,8 @@ class EmissionsPeakTest:
                     noise = self.noise_generator(1)[0]
 
                 # AR(1) step (adapt if your exact form differs)
-                residual_prev = y_prev - null_emissions_prev  # innovation from previous step (will be 0 for the first step)
-                y_next_sim = null_emissions_next + self.autocorr_params["phi"] * (residual_prev) + noise  # null trend + autocorrelation from previous step + noise)
+                residual_prev = y_prev - null_emissions_prev  # deviation of the previous observed year from the null (0 for the first step)
+                y_next_sim = null_emissions_next + phi_eff * (residual_prev) + noise  # null trend + AR(1) re-centring (0 when no autocorrelation) + noise
 
                 sims.append(y_next_sim)
 
