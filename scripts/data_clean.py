@@ -10,6 +10,47 @@ from helper_functions import iso_to_name, name_to_iso
 MtC_TO_MtCO2 = 3.664
 IX_ORDER = ["region", "region_name", "variable", "unit"]
 
+EU27 = ["AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "EST", "FIN", "FRA",
+        "DEU", "GRC", "HUN", "IRL", "ITA", "LVA", "LTU", "LUX", "MLT", "NLD",
+        "POL", "PRT", "ROU", "SVK", "SVN", "ESP", "SWE"]
+
+# G20 membership uses EU27 as the European bloc (so France/Germany/Italy are not
+# double-counted). EU27 must be aggregated before G20 so the sum can use it.
+G20 = ["AUS", "ARG", "BRA", "CAN", "CHN", "EU27", "IND", "IDN", "JPN", "MEX",
+       "RUS", "SAU", "KOR", "TUR", "GBR", "USA", "ZAF"]
+
+# G20 and G20_excl_CHN are omitted for now: primary_energy.csv is missing Turkey,
+# which would make their energy-based intensities undercount. Add them back here
+# (e.g. "G20": G20, "G20_excl_CHN": [m for m in G20 if m != "CHN"]) once fixed.
+AGGREGATES = {
+    "EU27": EU27,
+}
+
+
+def add_aggregate(df, name, members):
+    """Append a `name` aggregate row (sum of `members`) to a single-variable,
+    region-indexed frame, unless a row for `name` is already present (e.g. a
+    native aggregate from the source)."""
+    regions = df.index.get_level_values("region")
+    if name in set(regions):
+        return df
+    rows = df[regions.isin(members)]
+    if rows.empty:
+        return df
+    variable = df.index.get_level_values("variable")[0]
+    unit = df.index.get_level_values("unit")[0]
+    agg = rows.sum(axis=0, min_count=1).to_frame().T
+    agg.index = pd.MultiIndex.from_tuples(
+        [(name, name, variable, unit)], names=IX_ORDER)
+    return pd.concat([df, agg])
+
+
+def add_aggregates(df):
+    """Add every regional aggregate in AGGREGATES (EU27, G20, G20_excl_CHN)."""
+    for name, members in AGGREGATES.items():
+        df = add_aggregate(df, name, members)
+    return df
+
 # –-------------------------------------------------------
 # CO2 emissions
 # –-------------------------------------------------------
@@ -36,7 +77,8 @@ fossil_co2.to_csv("data/processed/gcb_hist_co2.csv")
 # GDP
 # –-------------------------------------------------------
 
-gdp = pd.read_csv("data/raw/WorldBank_GDP.csv", skiprows=4, index_col=[0, 1, 2, 3])
+# World Bank WDI, GDP (constant 2015 US$), NY.GDP.MKTP.KD, 2026 release (through 2025)
+gdp = pd.read_csv("data/raw/API_NY.GDP.MKTP.KD_DS2_en_csv_v2_64.csv", skiprows=4, index_col=[0, 1, 2, 3])
 gdp.index.names = ["region_name", "region", "variable", "id"]
 gdp = gdp.droplevel(["region_name", "id"])
 
@@ -53,6 +95,7 @@ gdp = gdp.pix.assign(
 gdp = gdp.reorder_levels(IX_ORDER)
 gdp = gdp.dropna(how="all", axis=1)
 gdp.columns = gdp.columns.astype(int)
+gdp = add_aggregates(gdp)  # WDI has no EU27/G20 aggregates; build from members
 gdp.to_csv("data/processed/wdi_gdp.csv")
 
 
@@ -78,32 +121,15 @@ pe = pe.pix.assign(
 )
 pe = pe.reorder_levels(IX_ORDER)
 pe.columns = pe.columns.astype(int)
-pe = pe.loc[isin(region = list(filter(lambda s:len(s)==3, pe.pix.project('region').index)))]
+pe = pe.loc[isin(region=[r for r in pe.pix.project('region').index
+                         if len(r) == 3 or r in AGGREGATES])]
+pe = add_aggregates(pe)  # keep native EU27, add G20 / G20_excl_CHN
 pe.to_csv("data/processed/primary_energy.csv")
 
 
-# –-------------------------------------------------------
-# Intensities
-# –-------------------------------------------------------
-
-ci_gdp = (fossil_co2 / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
-    how="all", axis=1
-)
-ci_gdp = ci_gdp.pix.assign(variable="Carbon Intensity", unit="g CO2 / $")
-ci_gdp.to_csv("data/processed/carbon_intensity_gdp.csv")
-
-
-ei_gdp = (pe / gdp.droplevel(["variable", "unit"])).dropna(how="all").dropna(
-    how="all", axis=1
-)
-ei_gdp = ei_gdp.pix.assign(variable="Energy Intensity", unit="MJ / $")
-ei_gdp.to_csv("data/processed/energy_intensity_gdp.csv")
-
-ci_energy = (fossil_co2 / pe.droplevel(["variable", "unit"])).dropna(how="all").dropna(
-    how="all", axis=1
-)
-ci_energy = ci_energy.pix.assign(variable="Carbon Intensity", unit="g CO2 / MJ")
-ci_energy.to_csv("data/processed/carbon_intensity_energy.csv")
+# Intensities are produced further down, under "Intensities (per CO2 source)",
+# once the GCB energy-CO2 series (coal+oil+gas) has been built, so they can be
+# emitted for both the GCB and EDGAR energy-CO2 sources.
 
 # –-------------------------------------------------------
 # GCB 2026 fossil CO2 (new flat-format release)
@@ -150,6 +176,72 @@ gcb26_wide = gcb26_long.pivot_table(
 gcb26_wide.columns = [int(c) for c in gcb26_wide.columns]
 gcb26_wide = gcb26_wide.sort_index()
 gcb26_wide.to_csv("data/processed/gcb_hist_co2_2026v11.csv")
+
+# GCB energy-CO2 series = coal + oil + gas. Excludes cement, flaring and other
+# carbonate/process emissions, to match the scope of EDGAR energy CO2. Uses the
+# same variable name as EDGAR ("Emissions|CO2|Energy") so the two are
+# interchangeable downstream.
+ENERGY_PARTS = [
+    "Emissions|CO2|Fossil|Coal",
+    "Emissions|CO2|Fossil|Oil",
+    "Emissions|CO2|Fossil|Gas",
+]
+gcb_energy_co2 = (
+    gcb26_wide.loc[gcb26_wide.index.get_level_values("variable").isin(ENERGY_PARTS)]
+    .groupby(level=["region", "region_name"]).sum(min_count=1)
+)
+gcb_energy_co2 = gcb_energy_co2.pix.assign(
+    variable="Emissions|CO2|Energy", unit="Mt CO2"
+).reorder_levels(IX_ORDER)
+gcb_energy_co2 = add_aggregates(gcb_energy_co2)  # flat file has no aggregates
+gcb_energy_co2.to_csv("data/processed/gcb_energy_co2.csv")
+
+# –-------------------------------------------------------
+# Intensities (per CO2 source)
+# –-------------------------------------------------------
+# One set of carbon intensities per energy-CO2 source (GCB coal+oil+gas and
+# EDGAR energy), suffixed by source. Energy intensity (energy / GDP) uses no
+# emissions, so it is source-independent and written once. Ratios are aligned on
+# region (ISO), so source-specific region_name labels do not need to match.
+
+edgar_energy_co2 = pd.read_csv("data/processed/edgar_energy_co2.csv", index_col=IX_ORDER)
+edgar_energy_co2.columns = edgar_energy_co2.columns.astype(int)
+
+
+def _by_region(df):
+    """Collapse a (region, region_name, variable, unit) frame to region-indexed
+    with integer year columns."""
+    out = df.droplevel([lvl for lvl in df.index.names if lvl != "region"])
+    out.columns = out.columns.astype(int)
+    return out
+
+
+def _ratio(numerator, denominator, variable, unit):
+    """numerator / denominator aligned on region (ISO) and year; region_name is
+    taken from the numerator."""
+    name_map = dict(zip(numerator.index.get_level_values("region"),
+                        numerator.index.get_level_values("region_name")))
+    out = _by_region(numerator).div(_by_region(denominator))
+    out = out.dropna(how="all").dropna(how="all", axis=1)
+    out.index = pd.MultiIndex.from_arrays(
+        [out.index, out.index.map(name_map),
+         [variable] * len(out), [unit] * len(out)],
+        names=IX_ORDER,
+    )
+    return out
+
+
+# Energy intensity of GDP (source-independent)
+_ratio(pe, gdp, "Energy Intensity", "MJ / $").to_csv(
+    "data/processed/energy_intensity_gdp.csv")
+
+# Carbon intensities, one set per energy-CO2 source
+energy_co2_sources = {"gcb": gcb_energy_co2, "edgar": edgar_energy_co2}
+for label, co2 in energy_co2_sources.items():
+    _ratio(co2, gdp, "Carbon Intensity", "g CO2 / $").to_csv(
+        f"data/processed/carbon_intensity_gdp_{label}.csv")
+    _ratio(co2, pe, "Carbon Intensity", "g CO2 / MJ").to_csv(
+        f"data/processed/carbon_intensity_energy_{label}.csv")
 
 # –-------------------------------------------------------
 # LULUCF Data Hub (EU Forest Observatory), version 4.1.0
