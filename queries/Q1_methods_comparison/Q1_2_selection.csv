@@ -1,0 +1,43 @@
+dataset,region,selected_method,years_excluded,n_passing,passing_methods,warnings
+EDGAR,WLD,linear_w_autocorrelation,"[2010, 2020]",2,"linear_w_autocorrelation, hamilton",
+EDGAR,EU27,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,ARG,linear_w_autocorrelation,[],4,"linear, linear_w_autocorrelation, hamilton, lowess",
+EDGAR,AUS,broken_trend,[],3,"linear_w_autocorrelation, broken_trend, hamilton",
+EDGAR,BRA,broken_trend,[],3,"linear, linear_w_autocorrelation, broken_trend",
+EDGAR,CAN,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,CHN,broken_trend,[],3,"broken_trend, hp, hamilton",
+EDGAR,DEU,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,FRA,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,GBR,broken_trend,[1979],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,IDN,broken_trend,[2020],2,"broken_trend, hamilton",
+EDGAR,IND,,,0,,"linear_w_autocorrelation: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; hp: [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hamilton: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints"
+EDGAR,ITA,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+EDGAR,JPN,broken_trend,[],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+EDGAR,KOR,linear_w_autocorrelation,"[1998, 2010]",3,"linear_w_autocorrelation, hp, hamilton",broken_trend: possible structural break around 2010-2011 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints
+EDGAR,MEX,broken_trend,[2020],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+EDGAR,RUS,broken_trend,[],4,"linear_w_autocorrelation, broken_trend, hamilton, spline",
+EDGAR,SAU,linear_w_autocorrelation,[],3,"linear_w_autocorrelation, hp, hamilton",
+EDGAR,TUR,linear,"[2017, 2021]",3,"linear, hamilton, spline",
+EDGAR,USA,broken_trend,[],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+EDGAR,ZAF,broken_trend,[],5,"linear_w_autocorrelation, broken_trend, hp, spline, lowess","linear: [2022] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually"
+GCB,WLD,linear_w_autocorrelation,"[2010, 2020]",4,"linear_w_autocorrelation, hp, hamilton, lowess",
+GCB,EU27,broken_trend,[],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,ARG,broken_trend,[],4,"linear, linear_w_autocorrelation, broken_trend, hamilton",hp: possible structural break around 2002-2003 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; lowess: possible structural break around 2002-2003 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints
+GCB,AUS,broken_trend,[],3,"linear_w_autocorrelation, broken_trend, hamilton",
+GCB,BRA,linear_w_autocorrelation,[],2,"linear_w_autocorrelation, spline",
+GCB,CAN,broken_trend,[2020],4,"linear, linear_w_autocorrelation, broken_trend, hamilton",
+GCB,CHN,linear_w_autocorrelation,[],3,"linear_w_autocorrelation, hamilton, spline",
+GCB,DEU,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+GCB,FRA,hp,[],4,"hp, hamilton, spline, lowess",
+GCB,GBR,broken_trend,[1979],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,IDN,spline,[],1,spline,"linear: [2022] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; linear_w_autocorrelation: [2022] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hp: possible structural break around 2020-2021 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; lowess: possible structural break around 2020-2021 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints"
+GCB,IND,,,0,,"linear_w_autocorrelation: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; broken_trend: [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hp: [2023] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually; hamilton: possible structural break around 2019-2020 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints; lowess: [2023, 2024] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually"
+GCB,ITA,broken_trend,[],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
+GCB,JPN,broken_trend,[],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,KOR,hp,"[1998, 2010, 2020]",1,hp,
+GCB,MEX,broken_trend,[2020],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,RUS,broken_trend,[],2,"broken_trend, hamilton",linear_w_autocorrelation: possible structural break around 1992-1994 (consecutive outliers of the same sign) - consider broken_trend or forced_breakpoints
+GCB,SAU,broken_trend,[],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,TUR,spline,[],2,"hamilton, spline","lowess: [2022] flagged as outlier(s) but within the last 3 historical years - not excluded, review manually"
+GCB,USA,broken_trend,[2020],6,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, lowess",
+GCB,ZAF,broken_trend,[2004],7,"linear, linear_w_autocorrelation, broken_trend, hp, hamilton, spline, lowess",
